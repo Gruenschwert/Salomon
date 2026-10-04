@@ -4,6 +4,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import ClassVar, Protocol
 
+import httpx
+
 from app.config import Settings
 from app.db.models import User
 from app.db.session import SessionFabrik
@@ -32,6 +34,8 @@ class ToolKontext:
 
     settings: Settings
     session_fabrik: SessionFabrik
+    # Nur für Tests: ersetzt die Netzwerkschicht von httpx.
+    http_transport: httpx.AsyncBaseTransport | None = None
 
 
 # Der Nutzer, in dessen Auftrag das Tool gerade läuft. Wird vom Ausführer gesetzt, damit
