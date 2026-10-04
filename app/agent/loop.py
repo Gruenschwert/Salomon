@@ -12,6 +12,7 @@ from app.config import Settings
 from app.db.models import User
 from app.db.session import SessionFabrik
 from app.observability.audit import protokolliere
+from app.observability.costs import Kosten
 from app.tools.base import ToolFehler, ToolKontext
 from app.tools.registry import Registry, ToolErgebnis, fuehre_tool_aus
 
@@ -24,6 +25,9 @@ MAX_ITERATIONEN_TEXT = (
 WARTET_AUF_FREIGABE_TEXT = (
     "Wartet auf Freigabe des Nutzers. Das Tool wurde NICHT ausgeführt. Der Nutzer sieht jetzt "
     "eine Vorschau mit den Buttons ✅ / ❌. Beende die Runde mit einem kurzen Hinweis darauf."
+)
+TAGESLIMIT_TEXT = (
+    "Das Tageslimit für KI-Kosten ist erreicht. Neue Anfragen sind ab morgen wieder möglich."
 )
 DIENST_FEHLER_TEXT = "Der KI-Dienst ist gerade nicht erreichbar. Bitte versuche es später erneut."
 ABLEHNUNG_TEXT = "Diese Anfrage kann ich nicht beantworten."
@@ -39,15 +43,19 @@ class Agent:
         client: anthropic.AsyncAnthropic,
         registry: Registry,
         freigaben: Freigaben,
+        kosten: Kosten,
     ) -> None:
         self._settings = settings
         self._session_fabrik = session_fabrik
         self._client = client
         self._registry = registry
         self._freigaben = freigaben
+        self._kosten = kosten
         self._kontext = ToolKontext(settings=settings, session_fabrik=session_fabrik)
 
     async def beantworte(self, nachricht: EingehendeNachricht, user: User) -> Antwort:
+        if await self._kosten.limit_erreicht():
+            return Antwort(text=TAGESLIMIT_TEXT)
         verlauf = await lade_verlauf(
             self._session_fabrik, nachricht.chat_id, self._settings.history_max_messages
         )
@@ -76,6 +84,7 @@ class Agent:
             anfrage["tools"] = tools
         for _ in range(self._settings.max_tool_iterations):
             response = await self._client.messages.create(**anfrage, messages=messages)
+            await self._kosten.verbuche(user.id, *_tokens(response.usage))
             if response.stop_reason != "tool_use":
                 return _antworttext(response)
             messages.append({"role": "assistant", "content": response.content})
@@ -121,6 +130,16 @@ class Agent:
             log.exception("Freigabe für Tool %s konnte nicht angelegt werden", name)
             return ToolErgebnis(f"Interner Fehler im Tool {name}.", fehler=True)
         return ToolErgebnis(WARTET_AUF_FREIGABE_TEXT)
+
+
+def _tokens(usage: anthropic.types.Usage) -> tuple[int, int]:
+    """Input- und Output-Tokens; Cache-Tokens zählen vorsichtshalber voll als Input."""
+    eingabe = (
+        usage.input_tokens
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+    )
+    return eingabe, usage.output_tokens
 
 
 def _antworttext(response: anthropic.types.Message) -> str:

@@ -9,6 +9,8 @@ from app.auth.users import finde_erlaubten_nutzer, synchronisiere_whitelist
 from app.config import Settings
 from app.db.models import Base
 from app.db.session import erstelle_session_fabrik
+from app.observability.alerts import Alarme
+from app.observability.costs import Kosten
 from app.tools.base import ToolKontext
 from app.tools.registry import lade_registry
 from tests.beispiel_tools.schreibend import BeispielSchreiben
@@ -29,6 +31,9 @@ def settings() -> Settings:
         model_default="test-modell",
         model_cheap="test-modell-guenstig",
         database_url="sqlite+aiosqlite://",
+        price_input_usd_per_mtok="2",
+        price_output_usd_per_mtok="10",
+        usd_eur_rate="0.5",
     )
 
 
@@ -75,8 +80,29 @@ def freigaben(kontext, registry) -> Freigaben:
 
 
 @pytest.fixture
-def baue_agent(settings, session_fabrik, registry, freigaben):
+def alarm_texte() -> list[tuple[int, str]]:
+    """Alle verschickten Alarme als (Chat-ID, Text)."""
+    return []
+
+
+@pytest.fixture
+def alarme(session_fabrik, alarm_texte) -> Alarme:
+    async def sende(chat_id: int, text: str) -> None:
+        alarm_texte.append((chat_id, text))
+
+    alarme = Alarme(session_fabrik)
+    alarme.verbinde(sende)
+    return alarme
+
+
+@pytest.fixture
+def kosten(settings, session_fabrik, alarme) -> Kosten:
+    return Kosten(settings, session_fabrik, alarme)
+
+
+@pytest.fixture
+def baue_agent(settings, session_fabrik, registry, freigaben, kosten):
     def _baue(client) -> Agent:
-        return Agent(settings, session_fabrik, client, registry, freigaben)
+        return Agent(settings, session_fabrik, client, registry, freigaben, kosten)
 
     return _baue

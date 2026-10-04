@@ -9,6 +9,9 @@ PFLICHT = {
     "MODEL_DEFAULT": "modell-a",
     "MODEL_CHEAP": "modell-b",
     "DATABASE_URL": "sqlite+aiosqlite://",
+    "PRICE_INPUT_USD_PER_MTOK": "2.00",
+    "PRICE_OUTPUT_USD_PER_MTOK": "10.00",
+    "USD_EUR_RATE": "0.9",
 }
 
 

@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     daily_cost_limit_eur: Decimal = Decimal("5")
     history_max_messages: int = 20
 
+    # Kostenberechnung: Preise von MODEL_DEFAULT in USD pro 1 Mio. Tokens, fester Kurs
+    price_input_usd_per_mtok: Decimal
+    price_output_usd_per_mtok: Decimal
+    usd_eur_rate: Decimal
+
     # Datenbank
     database_url: SecretStr
 
