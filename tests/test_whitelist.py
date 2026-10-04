@@ -13,7 +13,7 @@ def _nachricht(absender_id: int, text: str = "Hallo") -> EingehendeNachricht:
 
 
 @pytest.fixture
-async def kanal(settings, session_fabrik):
+async def kanal(settings, session_fabrik, freigaben):
     await synchronisiere_whitelist(session_fabrik, settings)
     aufrufe = []
 
@@ -21,7 +21,7 @@ async def kanal(settings, session_fabrik):
         aufrufe.append(nachricht)
         return Antwort(text=nachricht.text)
 
-    kanal = TelegramKanal(settings, session_fabrik, handler=handler)
+    kanal = TelegramKanal(settings, session_fabrik, handler=handler, freigaben=freigaben)
     kanal.aufrufe = aufrufe
     return kanal
 

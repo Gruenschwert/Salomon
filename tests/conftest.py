@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import tests.beispiel_tools
+from app.agent.loop import Agent
+from app.auth.approvals import Freigaben
 from app.auth.users import finde_erlaubten_nutzer, synchronisiere_whitelist
 from app.config import Settings
 from app.db.models import Base
@@ -65,3 +67,16 @@ def registry(kontext):
     """Registry mit Beispiel-Tools statt der echten Tools."""
     BeispielSchreiben.ausgefuehrt.clear()
     return lade_registry(kontext, paket=tests.beispiel_tools)
+
+
+@pytest.fixture
+def freigaben(kontext, registry) -> Freigaben:
+    return Freigaben(kontext, registry)
+
+
+@pytest.fixture
+def baue_agent(settings, session_fabrik, registry, freigaben):
+    def _baue(client) -> Agent:
+        return Agent(settings, session_fabrik, client, registry, freigaben)
+
+    return _baue

@@ -6,12 +6,13 @@ import anthropic
 
 from app.agent.history import lade_verlauf, speichere_austausch
 from app.agent.prompts import SYSTEM_PROMPT
-from app.channels.base import Antwort, EingehendeNachricht
+from app.auth.approvals import Freigaben
+from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
 from app.config import Settings
 from app.db.models import User
 from app.db.session import SessionFabrik
 from app.observability.audit import protokolliere
-from app.tools.base import ToolKontext
+from app.tools.base import ToolFehler, ToolKontext
 from app.tools.registry import Registry, ToolErgebnis, fuehre_tool_aus
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,10 @@ log = logging.getLogger(__name__)
 MAX_ITERATIONEN_TEXT = (
     "Ich habe die maximale Anzahl an Tool-Schritten erreicht und breche hier ab. "
     "Bitte stelle die Frage enger gefasst noch einmal."
+)
+WARTET_AUF_FREIGABE_TEXT = (
+    "Wartet auf Freigabe des Nutzers. Das Tool wurde NICHT ausgeführt. Der Nutzer sieht jetzt "
+    "eine Vorschau mit den Buttons ✅ / ❌. Beende die Runde mit einem kurzen Hinweis darauf."
 )
 DIENST_FEHLER_TEXT = "Der KI-Dienst ist gerade nicht erreichbar. Bitte versuche es später erneut."
 ABLEHNUNG_TEXT = "Diese Anfrage kann ich nicht beantworten."
@@ -33,11 +38,13 @@ class Agent:
         session_fabrik: SessionFabrik,
         client: anthropic.AsyncAnthropic,
         registry: Registry,
+        freigaben: Freigaben,
     ) -> None:
         self._settings = settings
         self._session_fabrik = session_fabrik
         self._client = client
         self._registry = registry
+        self._freigaben = freigaben
         self._kontext = ToolKontext(settings=settings, session_fabrik=session_fabrik)
 
     async def beantworte(self, nachricht: EingehendeNachricht, user: User) -> Antwort:
@@ -45,17 +52,21 @@ class Agent:
             self._session_fabrik, nachricht.chat_id, self._settings.history_max_messages
         )
         messages = [*verlauf, {"role": "user", "content": nachricht.text}]
+        # Freigaben, die in dieser Runde angelegt wurden; der Kanal zeigt sie mit Buttons an.
+        anfragen: list[FreigabeAnfrage] = []
         try:
-            text = await self._schleife(messages, user)
+            text = await self._schleife(messages, user, anfragen)
         except anthropic.APIError:
             log.exception("Claude-Aufruf fehlgeschlagen")
-            return Antwort(text=DIENST_FEHLER_TEXT)
+            return Antwort(text=DIENST_FEHLER_TEXT, freigaben=tuple(anfragen))
         await speichere_austausch(
             self._session_fabrik, nachricht.chat_id, user.id, nachricht.text, text
         )
-        return Antwort(text=text)
+        return Antwort(text=text, freigaben=tuple(anfragen))
 
-    async def _schleife(self, messages: list[dict], user: User) -> str:
+    async def _schleife(
+        self, messages: list[dict], user: User, anfragen: list[FreigabeAnfrage]
+    ) -> str:
         anfrage = {
             "model": self._settings.model_default,
             "max_tokens": self._settings.max_output_tokens,
@@ -72,7 +83,9 @@ class Agent:
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                ergebnis = await self._bearbeite_tool_anfrage(block.name, block.input, user)
+                ergebnis = await self._bearbeite_tool_anfrage(
+                    block.name, block.input, user, anfragen
+                )
                 ergebnisse.append(
                     {
                         "type": "tool_result",
@@ -84,7 +97,9 @@ class Agent:
             messages.append({"role": "user", "content": ergebnisse})
         return MAX_ITERATIONEN_TEXT
 
-    async def _bearbeite_tool_anfrage(self, name: str, params: dict, user: User) -> ToolErgebnis:
+    async def _bearbeite_tool_anfrage(
+        self, name: str, params: dict, user: User, anfragen: list[FreigabeAnfrage]
+    ) -> ToolErgebnis:
         tool = self._registry.hole(name)
         if tool is None or user.rolle not in tool.erlaubte_rollen:
             await protokolliere(
@@ -95,9 +110,17 @@ class Agent:
                 fehler="nicht verfügbar",
             )
             return ToolErgebnis(f"Das Tool {name} ist nicht verfügbar.", fehler=True)
-        if tool.schreibend:
-            return ToolErgebnis("Schreibende Tools sind nicht freigeschaltet.", fehler=True)
-        return await fuehre_tool_aus(tool, params, user, self._kontext)
+        if not tool.schreibend:
+            return await fuehre_tool_aus(tool, params, user, self._kontext)
+        # Schreibend: NICHT ausführen, sondern Freigabe anlegen.
+        try:
+            anfragen.append(await self._freigaben.anfragen(user, tool, params))
+        except ToolFehler as exc:
+            return ToolErgebnis(f"Fehler: {exc}", fehler=True)
+        except Exception:
+            log.exception("Freigabe für Tool %s konnte nicht angelegt werden", name)
+            return ToolErgebnis(f"Interner Fehler im Tool {name}.", fehler=True)
+        return ToolErgebnis(WARTET_AUF_FREIGABE_TEXT)
 
 
 def _antworttext(response: anthropic.types.Message) -> str:
