@@ -15,4 +15,4 @@ COPY . .
 RUN useradd --create-home --uid 1000 gs
 USER gs
 
-CMD ["python", "-m", "app.main"]
+CMD ["sh", "-c", "alembic upgrade head && exec python -m app.main"]
