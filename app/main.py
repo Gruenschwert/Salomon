@@ -10,6 +10,8 @@ from app.auth.users import synchronisiere_whitelist
 from app.channels.telegram import TelegramKanal
 from app.config import get_settings
 from app.db.session import db_check, erstelle_engine, erstelle_session_fabrik
+from app.tools.base import ToolKontext
+from app.tools.registry import lade_registry
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +33,8 @@ def main() -> None:
         log.info("gs-assistant %s gestartet", __version__)
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
-    agent = Agent(settings, session_fabrik, client)
+    registry = lade_registry(ToolKontext(settings=settings, session_fabrik=session_fabrik))
+    agent = Agent(settings, session_fabrik, client, registry)
     kanal = TelegramKanal(settings, session_fabrik, handler=agent.beantworte, beim_start=beim_start)
     kanal.starte()
 
