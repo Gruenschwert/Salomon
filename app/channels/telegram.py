@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 
 from app import __version__
+from app.agent.history import speichere_hinweis
 from app.auth.approvals import Freigaben
 from app.auth.users import finde_erlaubten_nutzer
 from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage, NachrichtenHandler
@@ -78,10 +79,8 @@ class TelegramKanal:
             await self._beim_start()
 
     async def sende_antwort(self, chat_id: int, text: str) -> None:
-        for anfang in range(0, len(text), TELEGRAM_MAX_ZEICHEN):
-            await self.application.bot.send_message(
-                chat_id=chat_id, text=text[anfang : anfang + TELEGRAM_MAX_ZEICHEN]
-            )
+        for teil in teile_text(text):
+            await self.application.bot.send_message(chat_id=chat_id, text=teil)
 
     async def sende_freigabe_anfrage(self, chat_id: int, anfrage: FreigabeAnfrage) -> None:
         kennung = f"{KLICK_PRAEFIX}:{anfrage.approval_id}"
@@ -93,10 +92,12 @@ class TelegramKanal:
                 ]
             ]
         )
+        # Lange Vorschauen gehen über mehrere Nachrichten; die Buttons hängen an der letzten.
+        teile = teile_text(f"Freigabe erforderlich (gültig 15 Minuten):\n{anfrage.vorschau_text}")
+        for teil in teile[:-1]:
+            await self.application.bot.send_message(chat_id=chat_id, text=teil)
         await self.application.bot.send_message(
-            chat_id=chat_id,
-            text=f"Freigabe erforderlich (gültig 15 Minuten):\n{anfrage.vorschau_text}",
-            reply_markup=buttons,
+            chat_id=chat_id, text=teile[-1], reply_markup=buttons
         )
 
     async def verarbeite(self, nachricht: EingehendeNachricht) -> Antwort | None:
@@ -191,11 +192,32 @@ class TelegramKanal:
         await query.answer()
         await query.edit_message_reply_markup(reply_markup=None)
         if update.effective_chat is not None:
+            if entscheidung.im_verlauf and entscheidung.user_id is not None:
+                await speichere_hinweis(
+                    self._session_fabrik,
+                    update.effective_chat.id,
+                    entscheidung.user_id,
+                    entscheidung.text,
+                )
             await self.sende_antwort(update.effective_chat.id, entscheidung.text)
 
     async def _bei_fehler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("Unbehandelter Fehler im Telegram-Adapter", exc_info=context.error)
         await self._melde_fehler("Telegram", context.error)
+
+
+def teile_text(text: str, maximum: int = TELEGRAM_MAX_ZEICHEN) -> list[str]:
+    """Teilt einen Text in Telegram-Nachrichten, möglichst an Zeilenenden."""
+    teile = []
+    while len(text) > maximum:
+        schnitt = text.rfind("\n", 0, maximum + 1)
+        if schnitt <= 0:
+            schnitt = maximum
+        teile.append(text[:schnitt])
+        text = text[schnitt:].removeprefix("\n")
+    if text:
+        teile.append(text)
+    return teile
 
 
 def _als_dauer(sekunden: float) -> str:

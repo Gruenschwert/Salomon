@@ -24,6 +24,8 @@ GEKUERZT_MARKE = "… [gekürzt]"
 class ToolErgebnis:
     text: str
     fehler: bool = False
+    # Das ungekürzte Ergebnis des Tools; None bei Fehlern
+    daten: dict | None = None
 
 
 class Registry:
@@ -81,8 +83,9 @@ async def fuehre_tool_aus(
     start = time.monotonic()
     marke = aktueller_nutzer.set(user)
     try:
+        daten = await tool.ausfuehren(**params)
         ergebnis = ToolErgebnis(
-            kuerze(json.dumps(await tool.ausfuehren(**params), ensure_ascii=False, default=str))
+            kuerze(json.dumps(daten, ensure_ascii=False, default=str)), daten=daten
         )
         fehler = None
     except ToolFehler as exc:

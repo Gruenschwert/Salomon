@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     model_default: str
     model_cheap: str
     max_tool_iterations: int = 8
-    max_output_tokens: int = 1500
+    max_output_tokens: int = 8000
     daily_cost_limit_eur: Decimal = Decimal("5")
     history_max_messages: int = 20
 

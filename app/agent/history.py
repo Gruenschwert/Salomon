@@ -11,6 +11,7 @@ from app.db.session import SessionFabrik
 
 ROLLE_NUTZER = "user"
 ROLLE_ASSISTENT = "assistant"
+MAX_HINWEIS_ZEICHEN = 3000
 
 
 async def lade_verlauf(
@@ -39,5 +40,21 @@ async def speichere_austausch(
         await session.flush()
         session.add(
             Message(chat_id=chat_id, user_id=user_id, rolle=ROLLE_ASSISTENT, inhalt=antwort)
+        )
+        await session.commit()
+
+
+async def speichere_hinweis(
+    session_fabrik: SessionFabrik, chat_id: int, user_id: int, text: str
+) -> None:
+    """Hält fest, was nach einer Freigabe passiert ist, damit Claude es beim nächsten Mal weiß."""
+    async with session_fabrik() as session:
+        session.add(
+            Message(
+                chat_id=chat_id,
+                user_id=user_id,
+                rolle=ROLLE_ASSISTENT,
+                inhalt=f"[Ergebnis der Freigabe]\n{text[:MAX_HINWEIS_ZEICHEN]}",
+            )
         )
         await session.commit()

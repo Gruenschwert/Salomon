@@ -1,4 +1,5 @@
-"""Datenbank-Modelle (Bauplan Abschnitt 7, plus `notizen` für das Demo-Tool)."""
+"""Datenbank-Modelle (Bauplan Abschnitt 7, plus `notizen` für das Demo-Tool und
+`asana_operationen` für den Ausführungsstand von Asana-Änderungssätzen)."""
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -26,6 +28,13 @@ STATUS_OFFEN = "offen"
 STATUS_GENEHMIGT = "genehmigt"
 STATUS_ABGELEHNT = "abgelehnt"
 STATUS_ABGELAUFEN = "abgelaufen"
+
+
+OP_OFFEN = "offen"
+OP_LAEUFT = "läuft"
+OP_ERLEDIGT = "erledigt"
+OP_FEHLGESCHLAGEN = "fehlgeschlagen"
+OP_NICHT_AUSGEFUEHRT = "nicht ausgeführt"
 
 
 def jetzt() -> datetime:
@@ -114,3 +123,20 @@ class Notiz(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     text: Mapped[str] = mapped_column(Text)
     erstellt_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+
+
+class AsanaOperation(Base):
+    """Ausführungsstand einer Operation eines Änderungssatzes (Schutz vor Duplikaten)."""
+
+    __tablename__ = "asana_operationen"
+    __table_args__ = (UniqueConstraint("approval_id", "position"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    approval_id: Mapped[int] = mapped_column(ForeignKey("approvals.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    art: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(20), default=OP_OFFEN)
+    # GID des angelegten oder geänderten Objekts
+    gid: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fehler: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ausgefuehrt_am: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
