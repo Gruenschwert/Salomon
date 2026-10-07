@@ -1,7 +1,7 @@
 """Tool-Schnittstelle."""
 
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
 import httpx
@@ -29,6 +29,18 @@ class Tool(Protocol):
     def ergebnis_text(self, ergebnis: dict) -> str | None: ...
 
     def zweite_bestaetigung(self, vorschau_text: str, **params) -> str | None: ...
+
+
+# Unter diesem Schlüssel kann ein Tool-Ergebnis eine `Ansicht` enthalten.
+ANSICHT_SCHLUESSEL = "_ansicht"
+
+
+@dataclass(frozen=True)
+class Ansicht:
+    """Bild oder PDF, das Claude zusätzlich zum Text des Ergebnisses zu sehen bekommt."""
+
+    medientyp: str
+    daten: bytes = field(repr=False)
 
 
 class ToolFehler(Exception):

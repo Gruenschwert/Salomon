@@ -32,6 +32,7 @@ from app.channels.base import (
 from app.config import Settings
 from app.db.models import ROLLE_ADMIN
 from app.db.session import SessionFabrik
+from app.medien import bild_medientyp as medientyp
 from app.observability.alerts import Alarme
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
 from app.observability.costs import Kosten, als_euro
@@ -375,19 +376,6 @@ class TelegramKanal:
 def groesstes_foto(fotos):
     """Telegram liefert jedes Foto in mehreren Größen; verwendet wird die größte Auflösung."""
     return max(fotos, key=lambda foto: foto.width * foto.height)
-
-
-def medientyp(daten: bytes) -> str | None:
-    """Erkennt den Medientyp am Dateianfang; None bei Formaten, die Claude nicht liest."""
-    if daten.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if daten.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if daten.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if daten[:4] == b"RIFF" and daten[8:12] == b"WEBP":
-        return "image/webp"
-    return None
 
 
 _FETT = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")

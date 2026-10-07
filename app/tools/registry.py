@@ -1,5 +1,6 @@
 """Findet und registriert Tools automatisch und führt sie mit Audit-Log aus."""
 
+import base64
 import importlib
 import inspect
 import json
@@ -11,8 +12,17 @@ from types import ModuleType
 
 import app.tools
 from app.db.models import User
+from app.medien import PDF
 from app.observability.audit import protokolliere
-from app.tools.base import BasisTool, Tool, ToolFehler, ToolKontext, aktueller_nutzer
+from app.tools.base import (
+    ANSICHT_SCHLUESSEL,
+    Ansicht,
+    BasisTool,
+    Tool,
+    ToolFehler,
+    ToolKontext,
+    aktueller_nutzer,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +36,8 @@ class ToolErgebnis:
     fehler: bool = False
     # Das ungekürzte Ergebnis des Tools; None bei Fehlern
     daten: dict | None = None
+    # Zusätzliche Inhaltsblöcke für Claude (Bild oder PDF), nie Teil von Log oder Verlauf
+    bloecke: tuple[dict, ...] = ()
 
 
 class Registry:
@@ -70,6 +82,17 @@ def lade_registry(kontext: ToolKontext, paket: ModuleType = app.tools) -> Regist
     return Registry(tools)
 
 
+def _ansicht_block(ansicht: Ansicht) -> dict:
+    return {
+        "type": "document" if ansicht.medientyp == PDF else "image",
+        "source": {
+            "type": "base64",
+            "media_type": ansicht.medientyp,
+            "data": base64.standard_b64encode(ansicht.daten).decode("ascii"),
+        },
+    }
+
+
 def kuerze(text: str, max_zeichen: int = MAX_ERGEBNIS_ZEICHEN) -> str:
     if len(text) <= max_zeichen:
         return text
@@ -84,8 +107,13 @@ async def fuehre_tool_aus(
     marke = aktueller_nutzer.set(user)
     try:
         daten = await tool.ausfuehren(**params)
+        # Ein Tool kann Claude eine Datei zum Ansehen mitgeben. Sie geht als eigener Block an
+        # Claude und taucht weder im Text noch im Audit-Log auf.
+        ansicht = daten.pop(ANSICHT_SCHLUESSEL, None) if isinstance(daten, dict) else None
         ergebnis = ToolErgebnis(
-            kuerze(json.dumps(daten, ensure_ascii=False, default=str)), daten=daten
+            kuerze(json.dumps(daten, ensure_ascii=False, default=str)),
+            daten=daten,
+            bloecke=(_ansicht_block(ansicht),) if ansicht else (),
         )
         fehler = None
     except ToolFehler as exc:

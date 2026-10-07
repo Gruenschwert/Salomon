@@ -44,6 +44,10 @@ def fake() -> FakeAsana:
     return FakeAsana()
 
 
+def _letzte(fake: FakeAsana, pfad: str):
+    return [a for a in fake.anfragen if a.url.path == f"/api/1.0{pfad}"][-1]
+
+
 @pytest.fixture
 def akontext(kontext, fake):
     return asana_kontext(kontext, fake)
@@ -154,15 +158,15 @@ async def test_aufgaben_suchen_weicht_ohne_bezahlten_tarif_auf_die_liste_aus(ako
 
     ergebnis = await tool.ausfuehren(text="etikett", projekt_gid="77")
     assert [a["gid"] for a in ergebnis["eintraege"]] == ["1", "3"]
-    liste = fake.anfragen[-1].url.params
+    liste = _letzte(fake, "/tasks").url.params
     assert liste["project"] == "77"
     assert liste["completed_since"] == "now"
 
     # Beim zweiten Aufruf wird die Suche gar nicht mehr versucht.
     await tool.ausfuehren(zustaendig_gid="me")
     assert fake.aufrufe().count(("GET", SUCHE)) == 1
-    assert fake.anfragen[-1].url.params["assignee"] == "me"
-    assert fake.anfragen[-1].url.params["workspace"] == "ws1"
+    assert _letzte(fake, "/tasks").url.params["assignee"] == "me"
+    assert _letzte(fake, "/tasks").url.params["workspace"] == "ws1"
 
 
 async def test_aufgaben_suchen_ohne_suche_braucht_projekt_oder_zustaendigen(akontext, fake):

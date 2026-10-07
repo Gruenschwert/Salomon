@@ -104,7 +104,9 @@ class Agent:
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": ergebnis.text,
+                        "content": [{"type": "text", "text": ergebnis.text}, *ergebnis.bloecke]
+                        if ergebnis.bloecke
+                        else ergebnis.text,
                         "is_error": ergebnis.fehler,
                     }
                 )

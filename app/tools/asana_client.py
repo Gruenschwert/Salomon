@@ -23,6 +23,13 @@ MASKIERT = "***"
 
 NICHT_KONFIGURIERT_TEXT = "Asana ist nicht konfiguriert (ASANA_TOKEN fehlt)."
 ZUGRIFF_VERWEIGERT_TEXT = "Asana-Zugriff verweigert."
+# 402 und 403 kommen auch dann, wenn eine Funktion im Tarif fehlt (Felder, Zeiterfassung,
+# Portfolios, Ziele, Startzeiten). Asana unterscheidet das nicht zuverlässig.
+TARIF_TEXT = (
+    "Asana-Zugriff verweigert: Das ist in eurem Asana-Tarif nicht verfügbar oder dein Token "
+    "darf das nicht."
+)
+DOWNLOAD_TIMEOUT_SEKUNDEN = 30.0
 NICHT_ERREICHBAR_TEXT = "Asana ist gerade nicht erreichbar."
 UNKLAR_TEXT = (
     "Asana hat nicht geantwortet. Ob die Änderung angekommen ist, ist unklar. "
@@ -163,14 +170,12 @@ class AsanaClient:
 
     def _auswerten(self, antwort: httpx.Response) -> dict:
         status = antwort.status_code
-        if status in (401, 403):
+        if status == 401:
             raise AsanaFehler(ZUGRIFF_VERWEIGERT_TEXT, status=status)
+        if status in (402, 403):
+            raise AsanaFehler(TARIF_TEXT, status=status)
         if status == 404:
             raise AsanaFehler("Asana kennt dieses Objekt nicht (GID prüfen).", status=status)
-        if status == 402:
-            raise AsanaFehler(
-                "Diese Funktion ist im aktuellen Asana-Tarif nicht enthalten.", status=status
-            )
         if status >= 500:
             raise AsanaFehler(f"Asana antwortet mit Status {status}.", status=status)
         try:
@@ -230,3 +235,33 @@ def begrenze(eintraege: list, weitere: bool = False, maximum: int = MAX_EINTRAEG
 def kuerze_text(text: str | None, maximum: int) -> str:
     text = (text or "").strip()
     return text if len(text) <= maximum else text[: maximum - 1] + "…"
+
+
+async def lade_herunter(kontext: ToolKontext, url: str, max_bytes: int) -> bytes:
+    """Lädt eine Datei von einer Download-Adresse, die Asana geliefert hat.
+
+    Bewusst ohne den Asana-Client: Die Adresse zeigt auf einen Dateispeicher außerhalb der
+    API, dorthin darf der Token nie mitgeschickt werden.
+    """
+    if not url.startswith("https://"):
+        raise AsanaFehler("Asana hat keine gültige Download-Adresse geliefert.")
+    daten = bytearray()
+    try:
+        async with (
+            httpx.AsyncClient(
+                timeout=DOWNLOAD_TIMEOUT_SEKUNDEN,
+                transport=kontext.http_transport,
+                follow_redirects=True,
+            ) as client,
+            client.stream("GET", url) as antwort,
+        ):
+            if antwort.status_code != 200:
+                raise AsanaFehler(f"Der Download antwortet mit Status {antwort.status_code}.")
+            async for stueck in antwort.aiter_bytes():
+                daten.extend(stueck)
+                if len(daten) > max_bytes:
+                    raise AsanaFehler("Die Datei ist größer als erlaubt.")
+    except httpx.HTTPError as exc:
+        log.warning("Download nicht möglich: %s", type(exc).__name__)
+        raise AsanaFehler("Die Datei konnte nicht heruntergeladen werden.") from None
+    return bytes(daten)

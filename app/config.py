@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     asana_max_deletes_per_changeset: int = 20
     asana_delete_enabled: bool = True
     asana_delete_roles: RollenListe = frozenset({"admin"})
+    asana_attachment_view_max_mb: float = 5
 
     # Foto-Eingang
     photo_max_mb: float = 5
@@ -72,6 +73,21 @@ class Settings(BaseSettings):
         if isinstance(wert, str):
             return frozenset(teil.strip() for teil in wert.split(",") if teil.strip())
         return wert
+
+    @model_validator(mode="before")
+    @classmethod
+    def _leere_werte_sind_standard(cls, werte: object) -> object:
+        """Eine leere Zeile wie `ASANA_MAX_OPS_PER_CHANGESET=` bedeutet: Standardwert."""
+        if isinstance(werte, dict):
+            mit_standard = {
+                name for name, feld in cls.model_fields.items() if not feld.is_required()
+            }
+            return {
+                name: wert
+                for name, wert in werte.items()
+                if not (wert == "" and name.lower() in mit_standard)
+            }
+        return werte
 
     @model_validator(mode="after")
     def _admins_sind_erlaubt(self) -> "Settings":

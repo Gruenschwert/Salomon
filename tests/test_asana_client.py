@@ -10,6 +10,7 @@ from app.tools.asana_client import (
     MAX_WIEDERHOLUNGEN,
     NICHT_ERREICHBAR_TEXT,
     NICHT_KONFIGURIERT_TEXT,
+    TARIF_TEXT,
     UNKLAR_TEXT,
     ZUGRIFF_VERWEIGERT_TEXT,
     AsanaClient,
@@ -136,8 +137,11 @@ async def test_lesender_aufruf_gibt_nach_drei_wiederholungen_auf(baue_client, fa
     assert len(fake.anfragen) == 1 + MAX_WIEDERHOLUNGEN
 
 
-@pytest.mark.parametrize("status", [401, 403])
-async def test_zugriff_verweigert_ohne_details(baue_client, fake, status):
+@pytest.mark.parametrize(
+    ("status", "meldung"),
+    [(401, ZUGRIFF_VERWEIGERT_TEXT), (402, TARIF_TEXT), (403, TARIF_TEXT)],
+)
+async def test_zugriff_verweigert_ohne_details(baue_client, fake, status, meldung):
     fake.route(
         "GET",
         "/tasks/1",
@@ -145,7 +149,9 @@ async def test_zugriff_verweigert_ohne_details(baue_client, fake, status):
     )
     with pytest.raises(AsanaFehler) as fehler:
         await baue_client().get("/tasks/1")
-    assert str(fehler.value) == ZUGRIFF_VERWEIGERT_TEXT
+    assert str(fehler.value) == meldung
+    assert "Asana-Zugriff verweigert" in meldung
+    assert "Tarif nicht verfügbar oder dein Token darf das nicht" in TARIF_TEXT
     assert fehler.value.status == status
 
 

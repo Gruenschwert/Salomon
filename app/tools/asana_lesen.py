@@ -1,5 +1,6 @@
 """Asana-Lese-Tools (laufen ohne Freigabe)."""
 
+import asyncio
 from datetime import date, timedelta
 
 from app.tools.asana_client import (
@@ -28,7 +29,14 @@ _AUFGABEN_FELDER = (
     "assignee.name",
     "memberships.project.name",
     "memberships.section.name",
+    "custom_fields.name",
+    "custom_fields.display_value",
 )
+# Die Wiederholungsregel ist in der Asana-Doku nicht beschrieben. Lehnt Asana das Feld ab,
+# wird es für den Rest der Laufzeit nicht mehr angefragt.
+WIEDERHOLUNG_FELD = "recurrence"
+MAX_ANHAENGE_GEZAEHLT = 100
+GLEICHZEITIGE_ZAEHLUNGEN = 5
 
 
 class AsanaLeseTool(BasisTool):
@@ -37,6 +45,28 @@ class AsanaLeseTool(BasisTool):
     def __init__(self, kontext: ToolKontext) -> None:
         super().__init__(kontext)
         self.asana = AsanaClient(kontext)
+        self._wiederholung_lesbar = True
+
+    async def _mit_wiederholung(self, abruf, felder: tuple[str, ...]):
+        """Ruft `abruf(felder)` auf und fragt die Wiederholungsregel mit an, solange das geht."""
+        if self._wiederholung_lesbar:
+            try:
+                return await abruf((*felder, WIEDERHOLUNG_FELD))
+            except AsanaFehler as exc:
+                if exc.status != 400:
+                    raise
+                self._wiederholung_lesbar = False
+        return await abruf(felder)
+
+    async def _zaehle_anhaenge(self, asana: AsanaClient, gid: str) -> int | str | None:
+        """Anzahl der Anhänge; None, wenn sie sich nicht lesen lassen."""
+        try:
+            anhaenge, weitere = await asana.liste(
+                "/attachments", {"parent": gid}, max_eintraege=MAX_ANHAENGE_GEZAEHLT
+            )
+        except AsanaFehler:
+            return None
+        return f"mehr als {MAX_ANHAENGE_GEZAEHLT}" if weitere else len(anhaenge)
 
 
 class AsanaProjekteSuchen(AsanaLeseTool):
@@ -89,8 +119,9 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
     beschreibung = (
         "Sucht Asana-Aufgaben. Filter: Text im Namen, Projekt, Zuständiger, Fälligkeit von/bis. "
         "Für „meine Aufgaben“ zustaendig_gid=me. Mindestens ein Filter ist nötig. Rückgabe je "
-        "Aufgabe: GID, Name, Fälligkeit, Zuständiger, Abschnitt, Projekt, erledigt. Höchstens "
-        "30 Treffer."
+        "Aufgabe: GID, Name, Fälligkeit, Zuständiger, Abschnitt, Projekt, erledigt, dazu die "
+        "Werte benutzerdefinierter Felder, die Anzahl der Anhänge und eine Wiederholungsregel, "
+        "falls vorhanden. Höchstens 30 Treffer."
     )
     parameter_schema = {
         "type": "object",
@@ -168,7 +199,21 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
             and _im_zeitraum(a.get("due_on"), von, bis)
         ]
         treffer.sort(key=lambda a: (a["faellig"] is None, a["faellig"] or ""))
-        return begrenze(treffer, weitere, maximum=limit)
+        ergebnis = begrenze(treffer, weitere, maximum=limit)
+        await self._ergaenze_anhaenge(ergebnis["eintraege"])
+        return ergebnis
+
+    async def _ergaenze_anhaenge(self, aufgaben: list[dict]) -> None:
+        schranke = asyncio.Semaphore(GLEICHZEITIGE_ZAEHLUNGEN)
+
+        async def zaehle(aufgabe: dict) -> None:
+            async with schranke:
+                anzahl = await self._zaehle_anhaenge(self.asana, aufgabe["gid"])
+            if anzahl is not None:
+                aufgabe["anhaenge"] = anzahl
+
+        async with self.asana:
+            await asyncio.gather(*(zaehle(aufgabe) for aufgabe in aufgaben))
 
     async def _ueber_suche(
         self,
@@ -193,7 +238,9 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
             "limit": 100,
         }
         pfad = f"/workspaces/{await asana.workspace_gid()}/tasks/search"
-        aufgaben = await asana.get(pfad, params, felder=_AUFGABEN_FELDER)
+        aufgaben = await self._mit_wiederholung(
+            lambda felder: asana.get(pfad, params, felder=felder), _AUFGABEN_FELDER
+        )
         return aufgaben, len(aufgaben) >= 100
 
     async def _ueber_liste(
@@ -210,8 +257,9 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
             )
         if nur_offene:
             params["completed_since"] = "now"
-        aufgaben, weitere = await asana.liste(
-            "/tasks", params, felder=_AUFGABEN_FELDER, max_eintraege=MAX_GELADEN
+        aufgaben, weitere = await self._mit_wiederholung(
+            lambda felder: asana.liste("/tasks", params, felder=felder, max_eintraege=MAX_GELADEN),
+            _AUFGABEN_FELDER,
         )
         if projekt_gid and zustaendig_gid:
             ich = (await asana.get("/users/me"))["gid"] if zustaendig_gid == ICH else zustaendig_gid
@@ -222,9 +270,10 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
 class AsanaAufgabeDetails(AsanaLeseTool):
     name = "asana_aufgabe_details"
     beschreibung = (
-        "Liefert alle Angaben zu einer Asana-Aufgabe: Felder, Unteraufgaben, Tags, "
-        "Abhängigkeiten und die letzten 10 Kommentare. Nutze es vor jeder Änderung an einer "
-        "Aufgabe, um den aktuellen Stand zu kennen."
+        "Liefert alle Angaben zu einer Asana-Aufgabe: Felder, benutzerdefinierte Felder, "
+        "Unteraufgaben, Tags, Abhängigkeiten, Anzahl der Anhänge, Wiederholungsregel und die "
+        "letzten 10 Kommentare (mit GID). Nutze es vor jeder Änderung an einer Aufgabe, um den "
+        "aktuellen Stand zu kennen."
     )
     parameter_schema = {
         "type": "object",
@@ -235,14 +284,16 @@ class AsanaAufgabeDetails(AsanaLeseTool):
     async def ausfuehren(self, aufgabe_gid: str) -> dict:
         gid = pruefe_gid(aufgabe_gid, "aufgabe_gid")
         async with self.asana as asana:
-            aufgabe = await asana.get(
-                f"/tasks/{gid}",
-                felder=(
+            aufgabe = await self._mit_wiederholung(
+                lambda felder: asana.get(f"/tasks/{gid}", felder=felder),
+                (
                     *_AUFGABEN_FELDER,
+                    "custom_fields.resource_subtype",
                     "notes",
                     "start_on",
                     "start_at",
                     "resource_subtype",
+                    "approval_status",
                     "completed_at",
                     "created_at",
                     "modified_at",
@@ -252,6 +303,7 @@ class AsanaAufgabeDetails(AsanaLeseTool):
                     "permalink_url",
                 ),
             )
+            anhaenge = await self._zaehle_anhaenge(asana, gid)
             unteraufgaben, mehr_unteraufgaben = await asana.liste(
                 f"/tasks/{gid}/subtasks",
                 felder=("name", "completed", "due_on", "assignee.name"),
@@ -272,6 +324,18 @@ class AsanaAufgabeDetails(AsanaLeseTool):
             "startdatum": aufgabe.get("start_on"),
             "startzeit": aufgabe.get("start_at"),
             "meilenstein": aufgabe.get("resource_subtype") == "milestone",
+            "aufgabentyp": aufgabe.get("resource_subtype"),
+            "genehmigung": aufgabe.get("approval_status"),
+            "anhaenge": anhaenge,
+            "benutzerfelder": [
+                {
+                    "gid": f["gid"],
+                    "name": f.get("name", ""),
+                    "typ": f.get("resource_subtype"),
+                    "wert": f.get("display_value"),
+                }
+                for f in aufgabe.get("custom_fields") or []
+            ],
             "uebergeordnet": _gid_und_name(aufgabe.get("parent")),
             "tags": [_gid_und_name(t) for t in aufgabe.get("tags") or []],
             "follower": [_gid_und_name(f) for f in aufgabe.get("followers") or []],
@@ -295,6 +359,7 @@ class AsanaAufgabeDetails(AsanaLeseTool):
             ],
             "kommentare": [
                 {
+                    "gid": k.get("gid"),
                     "von": _name(k.get("created_by")),
                     "am": k.get("created_at"),
                     "text": kuerze_text(k.get("text"), MAX_KOMMENTAR_ZEICHEN),
@@ -433,6 +498,21 @@ def _im_zeitraum(faellig: str | None, von: date | None, bis: date | None) -> boo
 
 def _aufgabe_kurz(aufgabe: dict) -> dict:
     zugehoerigkeiten = aufgabe.get("memberships") or []
+    kurz = _aufgabe_grunddaten(aufgabe, zugehoerigkeiten)
+    # Nur gefüllte Felder, damit die Liste kurz bleibt.
+    felder = {
+        f.get("name", ""): f["display_value"]
+        for f in aufgabe.get("custom_fields") or []
+        if f.get("display_value") not in (None, "")
+    }
+    if felder:
+        kurz["felder"] = felder
+    if aufgabe.get(WIEDERHOLUNG_FELD):
+        kurz["wiederholung"] = aufgabe[WIEDERHOLUNG_FELD]
+    return kurz
+
+
+def _aufgabe_grunddaten(aufgabe: dict, zugehoerigkeiten: list[dict]) -> dict:
     return {
         "gid": aufgabe["gid"],
         "name": aufgabe.get("name", ""),
