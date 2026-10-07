@@ -20,14 +20,23 @@ from app.tools.asana_operationen import (
     FARBEN,
     KATEGORIE_LOESCHEN,
     KATEGORIEN,
+    LOESCH_MARKE,
     OP_TYPEN,
     Lauf,
     OpErgebnis,
+    ist_loeschung,
     loese_platzhalter_auf,
     pruefe_operationen,
     q,
 )
-from app.tools.base import BasisTool, ToolFehler, ToolKontext, aktuelle_freigabe, aktueller_nutzer
+from app.tools.base import (
+    BasisTool,
+    ToolFehler,
+    ToolKontext,
+    aktuelle_freigabe,
+    aktueller_nutzer,
+    zweifach_bestaetigt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +92,10 @@ class AsanaAenderungenAusfuehren(BasisTool):
         "- tag_anlegen: name, farbe\n"
         "- tag_zuweisen: aufgabe_gid, tag_gid, entfernen\n"
         "- abhaengigkeit_setzen: aufgabe_gid, haengt_ab_von_gid, entfernen\n"
+        "- projekt_loeschen, abschnitt_loeschen, aufgabe_loeschen: gid. Löschen braucht eine "
+        "zweite Bestätigung des Nutzers und ist nicht rückgängig zu machen. Die GID muss aus "
+        "einem Lese-Tool stammen, nie nach Name allein löschen. Abschnitte lassen sich nur "
+        "leer löschen\n"
         "Platzhalter: Eine …_anlegen-Operation kann „platzhalter“ setzen ($p1 für Projekte, "
         "$s1 für Abschnitte, $a1 für Aufgaben, $t1 für Tags). Spätere Operationen desselben "
         "Satzes verwenden den Platzhalter überall dort, wo sonst eine GID steht. Alle anderen "
@@ -165,7 +178,50 @@ class AsanaAenderungenAusfuehren(BasisTool):
                 f"Der Änderungssatz hat {len(operationen)} Operationen, erlaubt sind höchstens "
                 f"{maximum}. Bitte in mehrere Sätze aufteilen."
             )
-        return pruefe_operationen(operationen)
+        ops = pruefe_operationen(operationen)
+        self._pruefe_loeschungen(ops)
+        return ops
+
+    def _pruefe_loeschungen(self, ops: list[dict]) -> None:
+        anzahl = sum(1 for op in ops if ist_loeschung(op))
+        if not anzahl:
+            return
+        settings = self.kontext.settings
+        if not settings.asana_delete_enabled:
+            raise ToolFehler(
+                "Löschen in Asana ist abgeschaltet (ASANA_DELETE_ENABLED=false). Es wurde "
+                "nichts vorgeschlagen."
+            )
+        if aktueller_nutzer.get().rolle not in settings.asana_delete_roles:
+            raise ToolFehler("Dieser Nutzer darf in Asana nichts löschen.")
+        if anzahl > settings.asana_max_deletes_per_changeset:
+            raise ToolFehler(
+                f"Der Änderungssatz enthält {anzahl} Löschoperationen, erlaubt sind höchstens "
+                f"{settings.asana_max_deletes_per_changeset}. Bitte aufteilen."
+            )
+
+    def zweite_bestaetigung(
+        self, vorschau_text: str, operationen: list | None = None
+    ) -> str | None:
+        """Sätze mit Löschungen brauchen nach dem ersten ✅ eine zweite Rückfrage."""
+        ops = [op for op in operationen or [] if isinstance(op, dict)]
+        anzahl = sum(1 for op in ops if op.get("operation") in OP_TYPEN and ist_loeschung(op))
+        if not anzahl:
+            return None
+        zeilen = [f"Wirklich löschen? {anzahl} {'Objekt' if anzahl == 1 else 'Objekte'}"]
+        zeilen += [zeile for zeile in vorschau_text.splitlines() if LOESCH_MARKE in zeile]
+        zeilen.append("Gelöschtes kann in der Regel nicht zuverlässig wiederhergestellt werden.")
+        andere = len(ops) - anzahl
+        if andere == 1:
+            zeilen.append(
+                "Auch die eine übrige Operation des Satzes läuft erst nach dieser Bestätigung."
+            )
+        elif andere:
+            zeilen.append(
+                f"Auch die übrigen {andere} Operationen des Satzes laufen erst nach dieser "
+                "Bestätigung."
+            )
+        return "\n".join(zeilen)
 
     def vorschau(self, **params) -> str:
         raise ToolFehler("Die Vorschau braucht den aktuellen Stand aus Asana.")
@@ -189,6 +245,8 @@ class AsanaAenderungenAusfuehren(BasisTool):
         if approval_id is None:
             raise ToolFehler("Asana-Änderungen laufen nur nach einer Freigabe durch den Nutzer.")
         ops = self._pruefe(operationen)
+        if any(ist_loeschung(op) for op in ops) and not zweifach_bestaetigt.get():
+            raise ToolFehler("Löschen läuft nur nach der zweiten Bestätigung durch den Nutzer.")
         if not await self._reserviere(approval_id, ops):
             raise ToolFehler(
                 "Dieser Änderungssatz wurde bereits ausgeführt. Es wird nichts erneut ausgeführt."

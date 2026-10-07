@@ -32,6 +32,7 @@ TELEGRAM_MAX_ZEICHEN = 4096
 KLICK_PRAEFIX = "freigabe"
 KLICK_JA = "ja"
 KLICK_NEIN = "nein"
+KLICK_LOESCHEN = "loeschen"
 FEHLER_TEXT = "Es ist ein interner Fehler aufgetreten. Bitte versuche es später erneut."
 NUR_ADMIN_TEXT = "Dieser Befehl ist Admins vorbehalten."
 
@@ -94,6 +95,26 @@ class TelegramKanal:
         )
         # Lange Vorschauen gehen über mehrere Nachrichten; die Buttons hängen an der letzten.
         teile = teile_text(f"Freigabe erforderlich (gültig 15 Minuten):\n{anfrage.vorschau_text}")
+        for teil in teile[:-1]:
+            await self.application.bot.send_message(chat_id=chat_id, text=teil)
+        await self.application.bot.send_message(
+            chat_id=chat_id, text=teile[-1], reply_markup=buttons
+        )
+
+    async def sende_loesch_rueckfrage(self, chat_id: int, approval_id: int, text: str) -> None:
+        """Zweite Rückfrage vor dem Löschen; die Buttons hängen an der letzten Nachricht."""
+        kennung = f"{KLICK_PRAEFIX}:{approval_id}"
+        buttons = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🗑 Ja, löschen", callback_data=f"{kennung}:{KLICK_LOESCHEN}"
+                    ),
+                    InlineKeyboardButton("Abbrechen", callback_data=f"{kennung}:{KLICK_NEIN}"),
+                ]
+            ]
+        )
+        teile = teile_text(text)
         for teil in teile[:-1]:
             await self.application.bot.send_message(chat_id=chat_id, text=teil)
         await self.application.bot.send_message(
@@ -177,7 +198,10 @@ class TelegramKanal:
         _, approval_id, wahl = query.data.split(":")
         try:
             entscheidung = await self._freigaben.entscheiden(
-                int(approval_id), update.effective_user.id, genehmigt=wahl == KLICK_JA
+                int(approval_id),
+                update.effective_user.id,
+                genehmigt=wahl in (KLICK_JA, KLICK_LOESCHEN),
+                bestaetigt=wahl == KLICK_LOESCHEN,
             )
         except Exception as exc:
             log.exception("Unbehandelter Fehler bei der Verarbeitung einer Freigabe")
@@ -191,6 +215,12 @@ class TelegramKanal:
             return
         await query.answer()
         await query.edit_message_reply_markup(reply_markup=None)
+        if entscheidung.rueckfrage:
+            if update.effective_chat is not None:
+                await self.sende_loesch_rueckfrage(
+                    update.effective_chat.id, int(approval_id), entscheidung.text
+                )
+            return
         if update.effective_chat is not None:
             if entscheidung.im_verlauf and entscheidung.user_id is not None:
                 await speichere_hinweis(

@@ -25,6 +25,8 @@ ROLLE_ADMIN = "admin"
 ROLLE_USER = "user"
 
 STATUS_OFFEN = "offen"
+# Erstes ✅ ist da, die zweite Rückfrage (Löschen) steht noch aus.
+STATUS_BESTAETIGUNG = "bestätigung"
 STATUS_GENEHMIGT = "genehmigt"
 STATUS_ABGELEHNT = "abgelehnt"
 STATUS_ABGELAUFEN = "abgelaufen"

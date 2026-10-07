@@ -90,6 +90,7 @@ _AUFGABE_FELDER = (
     "memberships.project.name",
     "memberships.section.name",
     "permalink_url",
+    "num_subtasks",
 )
 _PROJEKT_FELDER = ("name", "notes", "due_on", "owner.name", "color", "archived", "permalink_url")
 
@@ -239,6 +240,10 @@ def _pruefe_operation(roh: object, bekannt: dict[str, str]) -> dict:
                 raise ToolFehler(f"Das Feld „{feld}“ ist leer.")
             continue
         ref_typ = typ.gid_typ if feld == "gid" else REF_FELDER.get(feld)
+        if typ.kategorie == KATEGORIE_LOESCHEN and str(wert).startswith("$"):
+            raise ToolFehler(
+                "Gelöscht wird nur mit einer GID aus einem Lese-Tool, nie mit Platzhalter."
+            )
         if ref_typ:
             for ref in wert if isinstance(wert, list) else [wert]:
                 _pruefe_ref(feld, ref, ref_typ, bekannt)
@@ -1116,4 +1121,88 @@ class AbhaengigkeitSetzen:
             + ("entfernt" if entfernen else "gesetzt"),
             link=aufgabe.get("permalink_url", ""),
             felder=("abhaengigkeit",),
+        )
+
+
+# --------------------------------------------------------------------------------------
+# Löschen (läuft nur nach der zweiten Bestätigung)
+# --------------------------------------------------------------------------------------
+
+LOESCH_MARKE = "🗑 Löschen:"
+
+
+def ist_loeschung(op: dict) -> bool:
+    return OP_TYPEN[op["operation"]].kategorie == KATEGORIE_LOESCHEN
+
+
+@_registriere("projekt_loeschen", KATEGORIE_LOESCHEN, pflicht={"gid"}, gid_typ="projekt")
+class ProjektLoeschen:
+    @staticmethod
+    async def vorschau(op: dict, lauf: Lauf) -> str:
+        projekt = await lauf.projekt(op["gid"])
+        return f"{LOESCH_MARKE} Projekt {bez(projekt)} samt allen Aufgaben darin"
+
+    @staticmethod
+    async def ausfuehren(op: dict, lauf: Lauf) -> OpErgebnis:
+        projekt = await lauf.projekt(op["gid"])
+        await lauf.asana.delete(f"/projects/{op['gid']}")
+        lauf.vergiss("projekt", op["gid"])
+        return OpErgebnis(
+            gid=op["gid"],
+            text=f"Projekt {q(projekt.get('name'))} gelöscht",
+            vorher={"name": projekt.get("name", "")},
+        )
+
+
+@_registriere("abschnitt_loeschen", KATEGORIE_LOESCHEN, pflicht={"gid"}, gid_typ="abschnitt")
+class AbschnittLoeschen:
+    @staticmethod
+    async def vorschau(op: dict, lauf: Lauf) -> str:
+        abschnitt = await lauf.abschnitt(op["gid"])
+        projekt = abschnitt.get("project") or {}
+        text = f"{LOESCH_MARKE} Abschnitt {bez(abschnitt)} (Projekt {q(projekt.get('name'))})"
+        # Asana löscht nur leere Abschnitte.
+        aufgaben, weitere = await lauf.asana.liste(f"/sections/{op['gid']}/tasks", max_eintraege=50)
+        if aufgaben:
+            anzahl = "mehr als 50" if weitere else str(len(aufgaben))
+            text += (
+                f" – ⚠️ der Abschnitt ist nicht leer ({anzahl} Aufgaben); Asana wird das "
+                "Löschen ablehnen, solange die Aufgaben nicht verschoben oder gelöscht sind"
+            )
+        return text
+
+    @staticmethod
+    async def ausfuehren(op: dict, lauf: Lauf) -> OpErgebnis:
+        abschnitt = await lauf.abschnitt(op["gid"])
+        await lauf.asana.delete(f"/sections/{op['gid']}")
+        lauf.vergiss("abschnitt", op["gid"])
+        return OpErgebnis(
+            gid=op["gid"],
+            text=f"Abschnitt {q(abschnitt.get('name'))} gelöscht",
+            vorher={"name": abschnitt.get("name", "")},
+        )
+
+
+@_registriere("aufgabe_loeschen", KATEGORIE_LOESCHEN, pflicht={"gid"}, gid_typ="aufgabe")
+class AufgabeLoeschen:
+    @staticmethod
+    async def vorschau(op: dict, lauf: Lauf) -> str:
+        aufgabe = await lauf.aufgabe(op["gid"])
+        text = f"{LOESCH_MARKE} Aufgabe {bez(aufgabe)}"
+        if unteraufgaben := aufgabe.get("num_subtasks"):
+            text += f" samt {unteraufgaben} Unteraufgaben"
+        return text
+
+    @staticmethod
+    async def ausfuehren(op: dict, lauf: Lauf) -> OpErgebnis:
+        aufgabe = await lauf.aufgabe(op["gid"])
+        await lauf.asana.delete(f"/tasks/{op['gid']}")
+        lauf.vergiss("aufgabe", op["gid"])
+        return OpErgebnis(
+            gid=op["gid"],
+            text=f"Aufgabe {q(aufgabe.get('name'))} gelöscht",
+            vorher={
+                "name": aufgabe.get("name", ""),
+                "projekte": _ort(aufgabe.get("memberships") or []),
+            },
         )

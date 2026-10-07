@@ -10,6 +10,7 @@ from app.channels.base import FreigabeAnfrage
 from app.db.models import (
     STATUS_ABGELAUFEN,
     STATUS_ABGELEHNT,
+    STATUS_BESTAETIGUNG,
     STATUS_GENEHMIGT,
     STATUS_OFFEN,
     Approval,
@@ -17,7 +18,13 @@ from app.db.models import (
     jetzt,
 )
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
-from app.tools.base import Tool, ToolKontext, aktuelle_freigabe, aktueller_nutzer
+from app.tools.base import (
+    Tool,
+    ToolKontext,
+    aktuelle_freigabe,
+    aktueller_nutzer,
+    zweifach_bestaetigt,
+)
 from app.tools.registry import Registry, fuehre_tool_aus
 
 FREIGABE_GUELTIGKEIT = timedelta(minutes=15)
@@ -36,6 +43,8 @@ class Entscheidung:
     # True: Der Kanal schreibt den Text in den Gesprächsverlauf, damit Claude das Ergebnis kennt.
     im_verlauf: bool = False
     user_id: int | None = None
+    # True: `text` ist die zweite Rückfrage; der Kanal zeigt sie mit eigenen Buttons.
+    rueckfrage: bool = False
 
     @property
     def abgeschlossen(self) -> bool:
@@ -77,8 +86,13 @@ class Freigaben:
         telegram_id: int,
         genehmigt: bool,
         zeitpunkt: datetime | None = None,
+        bestaetigt: bool = False,
     ) -> Entscheidung | None:
-        """Verarbeitet einen Klick auf ✅ / ❌. None bedeutet: Klick eines unbekannten Nutzers."""
+        """Verarbeitet einen Klick auf ✅ / ❌. None bedeutet: Klick eines unbekannten Nutzers.
+
+        `bestaetigt=True` ist der Klick auf die zweite Rückfrage („🗑 Ja, löschen“). Er zählt
+        nur, wenn das erste ✅ schon da ist.
+        """
         zeitpunkt = zeitpunkt or jetzt()
         user = await finde_erlaubten_nutzer(self._session_fabrik, telegram_id)
         if user is None:
@@ -99,14 +113,26 @@ class Freigaben:
                     STATUS_FREMDER_NUTZER,
                     "Nur der anfragende Nutzer kann diese Freigabe entscheiden.",
                 )
+            tool = self._registry.hole(approval.tool_name)
+            frage = None
+            # Ablehnen und Ablaufen gehen in beiden Stufen, Zustimmen nur in der passenden.
+            erlaubte_stufen = [STATUS_OFFEN, STATUS_BESTAETIGUNG]
             if zeitpunkt - approval.erstellt_am > FREIGABE_GUELTIGKEIT:
                 neuer_status = STATUS_ABGELAUFEN
+            elif not genehmigt:
+                neuer_status = STATUS_ABGELEHNT
+            elif bestaetigt:
+                neuer_status = STATUS_GENEHMIGT
+                erlaubte_stufen = [STATUS_BESTAETIGUNG]
             else:
-                neuer_status = STATUS_GENEHMIGT if genehmigt else STATUS_ABGELEHNT
-            # Bedingtes Update: nur eine offene Freigabe kann entschieden werden (Doppelklick).
+                if tool is not None:
+                    frage = tool.zweite_bestaetigung(approval.vorschau_text, **approval.parameter)
+                neuer_status = STATUS_BESTAETIGUNG if frage else STATUS_GENEHMIGT
+                erlaubte_stufen = [STATUS_OFFEN]
+            # Bedingtes Update: Jede Stufe kann nur einmal entschieden werden (Doppelklick).
             ergebnis = await session.execute(
                 update(Approval)
-                .where(Approval.id == approval_id, Approval.status == STATUS_OFFEN)
+                .where(Approval.id == approval_id, Approval.status.in_(erlaubte_stufen))
                 .values(status=neuer_status, entschieden_am=zeitpunkt)
             )
             await session.commit()
@@ -115,8 +141,17 @@ class Freigaben:
                     STATUS_BEREITS_ENTSCHIEDEN, "Diese Freigabe wurde bereits entschieden."
                 )
 
+        if neuer_status == STATUS_BESTAETIGUNG:
+            await protokolliere(
+                self._session_fabrik,
+                user_id=user.id,
+                tool_name=approval.tool_name,
+                parameter={"freigabe": approval.id},
+                ergebnis_kurz=f"Freigabe #{approval.id}: zweite Bestätigung angefragt",
+            )
+            return Entscheidung(STATUS_BESTAETIGUNG, frage, user_id=user.id, rueckfrage=True)
         if neuer_status == STATUS_GENEHMIGT:
-            return await self._ausfuehren(approval, user)
+            return await self._ausfuehren(approval, user, zweifach=bestaetigt)
 
         await protokolliere(
             self._session_fabrik,
@@ -125,7 +160,6 @@ class Freigaben:
             parameter=approval.parameter,
             ergebnis_kurz=f"Freigabe #{approval.id} {neuer_status}",
         )
-        tool = self._registry.hole(approval.tool_name)
         verlauf = {"im_verlauf": bool(tool and tool.ergebnis_im_verlauf), "user_id": user.id}
         if neuer_status == STATUS_ABGELAUFEN:
             return Entscheidung(
@@ -137,7 +171,7 @@ class Freigaben:
             STATUS_ABGELEHNT, f"❌ Verworfen: {_kurztext(approval.vorschau_text)}", **verlauf
         )
 
-    async def _ausfuehren(self, approval: Approval, user: User) -> Entscheidung:
+    async def _ausfuehren(self, approval: Approval, user: User, zweifach: bool) -> Entscheidung:
         tool = self._registry.hole(approval.tool_name)
         if tool is None or user.rolle not in tool.erlaubte_rollen:
             await protokolliere(
@@ -151,9 +185,11 @@ class Freigaben:
                 STATUS_GENEHMIGT, "⚠️ Das Tool ist nicht mehr verfügbar; nichts wurde ausgeführt."
             )
         marke = aktuelle_freigabe.set(approval.id)
+        marke_zweifach = zweifach_bestaetigt.set(zweifach)
         try:
             ergebnis = await fuehre_tool_aus(tool, approval.parameter, user, self._kontext)
         finally:
+            zweifach_bestaetigt.reset(marke_zweifach)
             aktuelle_freigabe.reset(marke)
         kurz = _kurztext(approval.vorschau_text)
         if ergebnis.fehler:
@@ -166,13 +202,16 @@ class Freigaben:
         )
 
     async def anzahl_offen(self, zeitpunkt: datetime | None = None) -> int:
-        """Offene, noch nicht abgelaufene Freigaben."""
+        """Noch nicht abgelaufene Freigaben, die auf einen Klick warten."""
         grenze = (zeitpunkt or jetzt()) - FREIGABE_GUELTIGKEIT
         async with self._session_fabrik() as session:
             return await session.scalar(
                 select(func.count())
                 .select_from(Approval)
-                .where(Approval.status == STATUS_OFFEN, Approval.erstellt_am >= grenze)
+                .where(
+                    Approval.status.in_([STATUS_OFFEN, STATUS_BESTAETIGUNG]),
+                    Approval.erstellt_am >= grenze,
+                )
             )
 
 

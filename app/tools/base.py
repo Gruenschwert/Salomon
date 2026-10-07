@@ -28,6 +28,8 @@ class Tool(Protocol):
 
     def ergebnis_text(self, ergebnis: dict) -> str | None: ...
 
+    def zweite_bestaetigung(self, vorschau_text: str, **params) -> str | None: ...
+
 
 class ToolFehler(Exception):
     """Erwartbarer Fehler; die Meldung geht an Claude und darf keine internen Details enthalten."""
@@ -48,6 +50,8 @@ class ToolKontext:
 aktueller_nutzer: ContextVar[User] = ContextVar("aktueller_nutzer")
 # Die Freigabe, in deren Auftrag ein schreibendes Tool gerade läuft (None außerhalb davon).
 aktuelle_freigabe: ContextVar[int | None] = ContextVar("aktuelle_freigabe", default=None)
+# True, wenn der Nutzer für diese Freigabe auch die zweite Rückfrage bestätigt hat.
+zweifach_bestaetigt: ContextVar[bool] = ContextVar("zweifach_bestaetigt", default=False)
 
 
 class BasisTool:
@@ -77,4 +81,8 @@ class BasisTool:
 
     def ergebnis_text(self, ergebnis: dict) -> str | None:
         """Eigene Meldung an den Nutzer nach der Ausführung; None = Standardtext."""
+        return None
+
+    def zweite_bestaetigung(self, vorschau_text: str, **params) -> str | None:
+        """Text einer zweiten Rückfrage nach dem ersten ✅; None = keine nötig."""
         return None
