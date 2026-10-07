@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -215,7 +216,9 @@ class TelegramKanal:
 
     async def _sende(self, chat_id: int, antwort: Antwort | None) -> None:
         if antwort is not None:
-            await self.sende_antwort(chat_id, antwort.text)
+            # Nachrichten gehen als reiner Text raus; Markdown-Zeichen von Claude würden
+            # sonst wörtlich erscheinen. Vorschauen bleiben unangetastet.
+            await self.sende_antwort(chat_id, ohne_markdown(antwort.text))
             for anfrage in antwort.freigaben:
                 await self.sende_freigabe_anfrage(chat_id, anfrage)
 
@@ -385,6 +388,23 @@ def medientyp(daten: bytes) -> str | None:
     if daten[:4] == b"RIFF" and daten[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+_FETT = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
+_KURSIV = re.compile(r"(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![\w*])")
+_UEBERSCHRIFT = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+", re.MULTILINE)
+_STERN_LISTE = re.compile(r"^([ \t]*)\*[ \t]+", re.MULTILINE)
+_CODE = re.compile(r"`{1,3}([^`\n]+?)`{1,3}")
+
+
+def ohne_markdown(text: str) -> str:
+    """Entfernt Markdown-Auszeichnung, die Telegram als reinen Text wörtlich zeigen würde."""
+    text = _UEBERSCHRIFT.sub("", text)
+    text = _STERN_LISTE.sub(r"\1- ", text)
+    text = _FETT.sub(r"\2", text)
+    text = _KURSIV.sub(r"\1", text)
+    text = _CODE.sub(r"\1", text)
+    return text
 
 
 def teile_text(text: str, maximum: int = TELEGRAM_MAX_ZEICHEN) -> list[str]:

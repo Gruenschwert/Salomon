@@ -75,7 +75,7 @@ REF_FELDER = {
     "tags": "tag",
 }
 # In aufgabe_aendern und projekt_aendern löscht ein leerer Wert das Feld.
-LEERBAR = frozenset({"startdatum", "faellig", "faellig_um", "zustaendig_gid"})
+LEERBAR = frozenset({"startdatum", "start_um", "faellig", "faellig_um", "zustaendig_gid"})
 
 _AUFGABE_FELDER = (
     "name",
@@ -84,6 +84,7 @@ _AUFGABE_FELDER = (
     "due_on",
     "due_at",
     "start_on",
+    "start_at",
     "resource_subtype",
     "assignee.name",
     "parent.name",
@@ -284,8 +285,8 @@ def _pruefe_wert(feld: str, wert: object, leer_erlaubt: bool) -> object:
         return None
     if feld in ("faellig", "startdatum"):
         _parse_datum(wert, feld)
-    elif feld == "faellig_um":
-        _parse_zeitpunkt(wert, UTC)
+    elif feld in ("faellig_um", "start_um"):
+        _parse_zeitpunkt(wert, UTC, feld)
     elif feld == "farbe" and wert not in FARBEN:
         raise ToolFehler(f"Unbekannte Farbe. Erlaubt sind: {', '.join(FARBEN)}.")
     elif feld == "team_gid" or (feld in ("zustaendig_gid", "besitzer_gid") and wert != ICH):
@@ -346,7 +347,7 @@ def _parse_datum(wert: str, feld: str) -> date:
         raise ToolFehler(f"„{feld}“ muss ein Datum im Format JJJJ-MM-TT sein.") from None
 
 
-def _parse_zeitpunkt(wert: str, zone: tzinfo) -> datetime:
+def _parse_zeitpunkt(wert: str, zone: tzinfo, feld: str = "faellig_um") -> datetime:
     """Zeitpunkte ohne Zeitzone gelten als Ortszeit der konfigurierten Zone."""
     try:
         zeitpunkt = datetime.fromisoformat(wert)
@@ -354,14 +355,16 @@ def _parse_zeitpunkt(wert: str, zone: tzinfo) -> datetime:
         zeitpunkt = None
     # Ein reines Datum hätte genau zehn Zeichen.
     if zeitpunkt is None or len(wert) <= 10:
-        raise ToolFehler("„faellig_um“ muss Datum und Uhrzeit enthalten, z. B. 2026-10-15T14:30.")
+        raise ToolFehler(f"„{feld}“ muss Datum und Uhrzeit enthalten, z. B. 2026-10-15T14:30.")
     if zeitpunkt.tzinfo is None:
         zeitpunkt = zeitpunkt.replace(tzinfo=zone)
     return zeitpunkt
 
 
-def _asana_zeitpunkt(wert: str, zone: ZoneInfo) -> str:
-    return _parse_zeitpunkt(wert, zone).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+def _asana_zeitpunkt(wert: str, zone: ZoneInfo, feld: str = "faellig_um") -> str:
+    """ISO 8601 in UTC; die Ortszeit wird samt Sommer-/Winterzeit umgerechnet."""
+    zeitpunkt = _parse_zeitpunkt(wert, zone, feld)
+    return zeitpunkt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def datum_text(wert: str | None) -> str:
@@ -378,10 +381,102 @@ def zeitpunkt_text(wert: str | None, zone: ZoneInfo) -> str:
     return f"{WOCHENTAGE[lokal.weekday()]} {lokal:%d.%m.%Y %H:%M}"
 
 
-def _faellig_text(objekt: dict, zone: ZoneInfo) -> str:
-    if objekt.get("due_at"):
-        return zeitpunkt_text(objekt["due_at"], zone)
-    return datum_text(objekt.get("due_on"))
+def _termin_text(objekt: dict, zeit_feld: str, datum_feld: str, zone: ZoneInfo) -> str:
+    """Start oder Fälligkeit eines Asana-Objekts bzw. -Bodys als lesbarer Text."""
+    if objekt.get(zeit_feld):
+        return zeitpunkt_text(objekt[zeit_feld], zone)
+    return datum_text(objekt.get(datum_feld))
+
+
+MIT_UHRZEIT = "zeit"
+NUR_DATUM = "datum"
+# Ein Termin-Wert ist None oder (MIT_UHRZEIT | NUR_DATUM, Wert im Asana-Format).
+Termin = tuple[str, str] | None
+
+
+def _termin_aus_op(
+    op: dict, datum_feld: str, zeit_feld: str, zone: ZoneInfo
+) -> tuple[bool, Termin]:
+    """Liefert, ob die Operation diese Seite (Start oder Ende) anfasst, und den neuen Wert."""
+    if op.get(datum_feld) and op.get(zeit_feld):
+        raise ToolFehler(f"Bitte nur „{datum_feld}“ oder „{zeit_feld}“ angeben, nicht beide.")
+    if op.get(zeit_feld):
+        return True, (MIT_UHRZEIT, _asana_zeitpunkt(op[zeit_feld], zone, zeit_feld))
+    if op.get(datum_feld):
+        return True, (NUR_DATUM, op[datum_feld])
+    return datum_feld in op or zeit_feld in op, None
+
+
+def _termin_aus_bestand(aufgabe: dict, zeit_feld: str, datum_feld: str) -> Termin:
+    if aufgabe.get(zeit_feld):
+        return MIT_UHRZEIT, aufgabe[zeit_feld]
+    if aufgabe.get(datum_feld):
+        return NUR_DATUM, aufgabe[datum_feld]
+    return None
+
+
+def _termin_daten(op: dict, zone: ZoneInfo, aufgabe: dict | None = None) -> dict:
+    """Start und Fälligkeit für den Asana-Body, vorab geprüft.
+
+    Asana erlaubt nur drei Kombinationen: Zeitfenster (start_at + due_at), Fälligkeit allein
+    (due_at oder due_on) und Datumsbereich (start_on + due_on). Ändert eine Operation nur
+    Start oder nur Ende, kommt der andere Wert aus dem aktuellen Zustand der Aufgabe, damit
+    immer eine dieser Kombinationen gesendet wird.
+    """
+    start_neu, start = _termin_aus_op(op, "startdatum", "start_um", zone)
+    ende_neu, ende = _termin_aus_op(op, "faellig", "faellig_um", zone)
+    if not (start_neu or ende_neu):
+        return {}
+    # Eine im selben Satz neu angelegte Aufgabe hat noch keinen lesbaren Zustand.
+    bestand_bekannt = aufgabe is not None and not aufgabe.get("neu")
+    hatte_start = False
+    if bestand_bekannt:
+        alter_start = _termin_aus_bestand(aufgabe, "start_at", "start_on")
+        hatte_start = alter_start is not None
+        if not start_neu:
+            start = alter_start
+        if not ende_neu:
+            ende = _termin_aus_bestand(aufgabe, "due_at", "due_on")
+    # Bei einer neuen Aufgabe des Satzes ist die nicht angefasste Seite unbekannt.
+    ende_bekannt = ende_neu or bestand_bekannt or aufgabe is None
+
+    hinweis = (
+        " Der jeweils andere Wert stammt aus dem aktuellen Stand der Aufgabe."
+        if bestand_bekannt and not (start_neu and ende_neu)
+        else ""
+    )
+    if start is not None and ende is None and ende_bekannt:
+        if not start_neu:
+            # Die Fälligkeit wird gelöscht; ohne sie kann Asana keinen Start halten.
+            start = None
+        else:
+            raise ToolFehler(
+                "Ein Startdatum oder eine Startzeit braucht in Asana auch eine Fälligkeit."
+            )
+    if start is not None and ende is not None:
+        if start[0] != ende[0]:
+            raise ToolFehler(
+                "Start und Fälligkeit müssen beide mit oder beide ohne Uhrzeit angegeben sein. "
+                "Für ein Zeitfenster „start_um“ und „faellig_um“ verwenden, für ganze Tage "
+                f"„startdatum“ und „faellig“.{hinweis}"
+            )
+        if start[0] == MIT_UHRZEIT:
+            falsch = _parse_zeitpunkt(start[1], zone) >= _parse_zeitpunkt(ende[1], zone)
+        else:
+            falsch = start[1] > ende[1]
+        if falsch:
+            raise ToolFehler(f"Der Start muss vor der Fälligkeit liegen.{hinweis}")
+
+    daten: dict = {}
+    if ende is not None:
+        daten["due_at" if ende[0] == MIT_UHRZEIT else "due_on"] = ende[1]
+    elif ende_neu:
+        daten["due_on"] = None
+    if start is not None:
+        daten["start_at" if start[0] == MIT_UHRZEIT else "start_on"] = start[1]
+    elif start_neu or hatte_start:
+        daten["start_on"] = None
+    return daten
 
 
 def q(name: str | None) -> str:
@@ -408,8 +503,10 @@ def _ort(mitgliedschaften: list[dict]) -> list[dict]:
     ]
 
 
-def _aufgaben_daten(op: dict, zone: ZoneInfo) -> dict:
-    """Übersetzt die einfachen Aufgabenfelder in den Asana-Body. Leere Werte löschen."""
+def _aufgaben_daten(op: dict, zone: ZoneInfo, aufgabe: dict | None = None) -> dict:
+    """Übersetzt die einfachen Aufgabenfelder in den Asana-Body. Leere Werte löschen.
+
+    `aufgabe` ist bei Änderungen der aktuelle Zustand (für Start und Fälligkeit)."""
     daten: dict = {}
     if "name" in op:
         daten["name"] = op["name"]
@@ -417,16 +514,7 @@ def _aufgaben_daten(op: dict, zone: ZoneInfo) -> dict:
         daten["notes"] = op["beschreibung"]
     if "meilenstein" in op:
         daten["resource_subtype"] = "milestone" if op["meilenstein"] else "default_task"
-    if "startdatum" in op:
-        daten["start_on"] = op["startdatum"]
-    if op.get("faellig") and op.get("faellig_um"):
-        raise ToolFehler("Bitte nur „faellig“ oder „faellig_um“ angeben, nicht beide.")
-    if op.get("faellig_um"):
-        daten["due_at"] = _asana_zeitpunkt(op["faellig_um"], zone)
-    elif op.get("faellig"):
-        daten["due_on"] = op["faellig"]
-    elif "faellig" in op or "faellig_um" in op:
-        daten["due_on"] = None
+    daten.update(_termin_daten(op, zone, aufgabe))
     if "zustaendig_gid" in op:
         daten["assignee"] = op["zustaendig_gid"]
     return daten
@@ -704,6 +792,7 @@ _AUFGABEN_FELDER_OP = {
     "uebergeordnet",
     "meilenstein",
     "startdatum",
+    "start_um",
     "faellig",
     "faellig_um",
     "zustaendig_gid",
@@ -729,8 +818,6 @@ class AufgabeAnlegen:
     @staticmethod
     async def vorschau(op: dict, lauf: Lauf) -> str:
         daten = _aufgaben_daten(op, lauf.zone)
-        if daten.get("start_on") and not (daten.get("due_on") or daten.get("due_at")):
-            raise ToolFehler("Ein Startdatum braucht in Asana auch ein Fälligkeitsdatum.")
         teile = []
         ort, _ = await _ort_text(op, lauf)
         if ort:
@@ -739,12 +826,10 @@ class AufgabeAnlegen:
             teile.append(f"unter {bez(await lauf.aufgabe(op['uebergeordnet']))}")
         if not ort and "uebergeordnet" not in op:
             teile.append("ohne Projekt")
-        if daten.get("start_on"):
-            teile.append(f"Start {datum_text(daten['start_on'])}")
-        if daten.get("due_at"):
-            teile.append(f"fällig {zeitpunkt_text(daten['due_at'], lauf.zone)}")
-        elif daten.get("due_on"):
-            teile.append(f"fällig {datum_text(daten['due_on'])}")
+        if daten.get("start_at") or daten.get("start_on"):
+            teile.append(f"Start {_termin_text(daten, 'start_at', 'start_on', lauf.zone)}")
+        if daten.get("due_at") or daten.get("due_on"):
+            teile.append(f"fällig {_termin_text(daten, 'due_at', 'due_on', lauf.zone)}")
         if daten.get("assignee"):
             teile.append(f"zuständig {await _nutzer_name(lauf, daten['assignee'])}")
         else:
@@ -796,16 +881,9 @@ class AufgabeAnlegen:
 )
 class AufgabeAendern:
     @staticmethod
-    def _pruefe(op: dict, daten: dict, aufgabe: dict) -> None:
+    def _pruefe(op: dict) -> None:
         if len(op) <= 2:
             raise ToolFehler("aufgabe_aendern braucht mindestens ein zu änderndes Feld.")
-        if daten.get("start_on"):
-            if "due_on" in daten or "due_at" in daten:
-                faellig = daten.get("due_on") or daten.get("due_at")
-            else:
-                faellig = aufgabe.get("due_on") or aufgabe.get("due_at") or aufgabe.get("neu")
-            if not faellig:
-                raise ToolFehler("Ein Startdatum braucht in Asana auch ein Fälligkeitsdatum.")
 
     @staticmethod
     def _vorher(aufgabe: dict, daten: dict, op: dict) -> dict:
@@ -818,6 +896,9 @@ class AufgabeAendern:
             elif feld in ("due_on", "due_at"):
                 vorher["due_on"] = aufgabe.get("due_on")
                 vorher["due_at"] = aufgabe.get("due_at")
+            elif feld in ("start_on", "start_at"):
+                vorher["start_on"] = aufgabe.get("start_on")
+                vorher["start_at"] = aufgabe.get("start_at")
             else:
                 vorher[feld] = aufgabe.get(feld)
         if "uebergeordnet" in op:
@@ -829,8 +910,8 @@ class AufgabeAendern:
     @staticmethod
     async def vorschau(op: dict, lauf: Lauf) -> str:
         aufgabe = await lauf.aufgabe(op["gid"])
-        daten = _aufgaben_daten(op, lauf.zone)
-        AufgabeAendern._pruefe(op, daten, aufgabe)
+        AufgabeAendern._pruefe(op)
+        daten = _aufgaben_daten(op, lauf.zone, aufgabe)
         teile = []
         for feld, neu in daten.items():
             if feld == "name":
@@ -839,17 +920,19 @@ class AufgabeAendern:
                 teile.append("Beschreibung geändert")
             elif feld == "resource_subtype":
                 teile.append("wird Meilenstein" if neu == "milestone" else "wird normale Aufgabe")
-            elif feld == "start_on":
-                teile.append(f"Start {datum_text(aufgabe.get('start_on'))} → {datum_text(neu)}")
-            elif feld == "due_on":
-                teile.append(f"Fällig {_faellig_text(aufgabe, lauf.zone)} → {datum_text(neu)}")
-            elif feld == "due_at":
-                teile.append(
-                    f"Fällig {_faellig_text(aufgabe, lauf.zone)} → {zeitpunkt_text(neu, lauf.zone)}"
-                )
             elif feld == "assignee":
                 alt = (aufgabe.get("assignee") or {}).get("name") or LEER
                 teile.append(f"Zuständig {alt} → {await _nutzer_name(lauf, neu) if neu else LEER}")
+        # Start und Fälligkeit: Ein nur übernommener Wert ist keine Änderung und wird nicht gezeigt.
+        for label, zeit_feld, datum_feld in (
+            ("Start", "start_at", "start_on"),
+            ("Fällig", "due_at", "due_on"),
+        ):
+            if zeit_feld in daten or datum_feld in daten:
+                alt = _termin_text(aufgabe, zeit_feld, datum_feld, lauf.zone)
+                neu = _termin_text(daten, zeit_feld, datum_feld, lauf.zone)
+                if alt != neu:
+                    teile.append(f"{label} {alt} → {neu}")
         if "uebergeordnet" in op:
             teile.append(f"wird Unteraufgabe von {bez(await lauf.aufgabe(op['uebergeordnet']))}")
         if "projekt" in op or "abschnitt" in op:
@@ -858,14 +941,14 @@ class AufgabeAendern:
             teile.append(f"+ Tag {bez(await lauf.tag(tag))}")
         for gid in op.get("follower", []):
             teile.append(f"+ Follower {await _nutzer_name(lauf, gid)}")
-        return f"Ändern: {bez(aufgabe)}: " + "; ".join(teile)
+        return f"Ändern: {bez(aufgabe)}: " + ("; ".join(teile) or "keine Änderung nötig")
 
     @staticmethod
     async def ausfuehren(op: dict, lauf: Lauf) -> OpErgebnis:
         gid = op["gid"]
         aufgabe = await lauf.aufgabe(gid)
-        daten = _aufgaben_daten(op, lauf.zone)
-        AufgabeAendern._pruefe(op, daten, aufgabe)
+        AufgabeAendern._pruefe(op)
+        daten = _aufgaben_daten(op, lauf.zone, aufgabe)
         vorher = AufgabeAendern._vorher(aufgabe, daten, op)
         # Eine Operation kann mehrere Aufrufe brauchen. Scheitert ein späterer, wird gemeldet,
         # was davor schon geändert wurde.

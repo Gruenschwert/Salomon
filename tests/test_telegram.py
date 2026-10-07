@@ -140,3 +140,50 @@ async def test_lange_antwort_wird_aufgeteilt(
     monkeypatch.setattr(type(kanal.application.bot), "send_message", send_message)
     await kanal.sende_antwort(CHAT_ID, "a" * (TELEGRAM_MAX_ZEICHEN + 10))
     assert [len(teil) for teil in teile] == [TELEGRAM_MAX_ZEICHEN, 10]
+
+
+@pytest.mark.parametrize(
+    ("roh", "sauber"),
+    [
+        ("**Offen:** 3 Aufgaben", "Offen: 3 Aufgaben"),
+        ("Das ist *wichtig* und __fett__.", "Das ist wichtig und fett."),
+        ("## Projekte\n* Launch\n* Messe", "Projekte\n- Launch\n- Messe"),
+        ("Nutze `asana_projekte_suchen`.", "Nutze asana_projekte_suchen."),
+        ("1. **Stand buchen** – fällig 12.10.", "1. Stand buchen – fällig 12.10."),
+        # Kein Markdown: Rechnungen, Unterstriche in Namen und einzelne Sternchen bleiben.
+        ("2 * 3 = 6 und 4*5", "2 * 3 = 6 und 4*5"),
+        (
+            "Tool shopify_offene_bestellungen, Preis 5 * 2 €",
+            "Tool shopify_offene_bestellungen, Preis 5 * 2 €",
+        ),
+        ("- Punkt eins\n- Punkt zwei", "- Punkt eins\n- Punkt zwei"),
+    ],
+)
+def test_ohne_markdown(roh, sauber):
+    from app.channels.telegram import ohne_markdown
+
+    assert ohne_markdown(roh) == sauber
+
+
+async def test_antworten_gehen_ohne_sternchen_raus_vorschauen_bleiben(
+    settings, session_fabrik, freigaben, kosten, alarme, user, gesendet
+):
+    async def handler(nachricht, user):
+        return Antwort(
+            text="**Fertig:** 2 Aufgaben", freigaben=(FreigabeAnfrage(1, "Anlegen: „**roh**“"),)
+        )
+
+    kanal = TelegramKanal(
+        settings, session_fabrik, handler=handler, freigaben=freigaben, kosten=kosten, alarme=alarme
+    )
+
+    async def sende_antwort(chat_id: int, text: str) -> None:
+        gesendet.append(("text", text))
+
+    async def sende_freigabe_anfrage(chat_id: int, anfrage: FreigabeAnfrage) -> None:
+        gesendet.append(("freigabe", anfrage.vorschau_text))
+
+    kanal.sende_antwort = sende_antwort
+    kanal.sende_freigabe_anfrage = sende_freigabe_anfrage
+    await kanal._bei_nachricht(_update(ERLAUBT_ID, "Hallo"), None)
+    assert gesendet == [("text", "Fertig: 2 Aufgaben"), ("freigabe", "Anlegen: „**roh**“")]

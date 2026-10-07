@@ -114,6 +114,8 @@ Ist das Tageslimit (`DAILY_COST_LIMIT_EUR`, gilt für alle Nutzer zusammen) erre
 4. Enthält der Satz Löschungen, kommt nach ✅ die Rückfrage „Wirklich löschen? N Objekte“ mit den Buttons „🗑 Ja, löschen“ und „Abbrechen“. Bis zu dieser zweiten Bestätigung läuft **keine** Operation des Satzes, auch keine harmlose.
 5. Danach meldet der Bot das Ergebnis mit Link. Scheitert eine Operation, hört der Satz dort auf. Die Meldung nennt, was erledigt ist, was fehlgeschlagen ist und was nicht mehr lief. Es wird nichts wiederholt und nichts zurückgerollt.
 
+Termine gibt es in drei Formen: nur Fälligkeit (mit oder ohne Uhrzeit), ganze Tage von–bis und Zeitfenster mit Start- und Endzeit. Start ohne Uhrzeit und Fälligkeit mit Uhrzeit lassen sich in Asana nicht mischen; die Vorschau lehnt das ab, bevor etwas freigegeben wird. Wird an einer Aufgabe nur Start oder nur Ende geändert, übernimmt der Bot den anderen Wert aus dem aktuellen Stand. Uhrzeiten gelten als Ortszeit Europe/Berlin und gehen in UTC an Asana.
+
 Fotos: ein Foto (oder ein Album mit bis zu 5 Fotos) mit oder ohne Bildunterschrift schicken. Claude gibt erst wieder, was es erkannt hat, fragt Fehlendes gebündelt nach und schlägt dann den Änderungssatz vor. Die Bilder werden nicht gespeichert; im Verlauf steht nur „[Foto]“ plus Bildunterschrift.
 
 Was nicht geht, weil die Asana-API es nicht anbietet: wiederkehrende Aufgaben einrichten, Regeln/Automatisierungen, Formulare.
