@@ -1,10 +1,13 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import anthropic
 import httpx2
 from sqlalchemy import select
 
 from app.agent.history import lade_verlauf
 from app.agent.loop import DIENST_FEHLER_TEXT, MAX_ITERATIONEN_TEXT
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import ASANA_REGELN, SYSTEM_PROMPT, baue_system_prompt
 from app.channels.base import EingehendeNachricht
 from app.db.models import AuditLog
 from tests.beispiel_tools.schreibend import BeispielSchreiben
@@ -12,6 +15,9 @@ from tests.conftest import ERLAUBT_ID
 from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_block
 
 CHAT_ID = 7
+_WOCHENTAGE = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+_JETZT = datetime.now(ZoneInfo("Europe/Berlin"))
+_HEUTE = f"{_WOCHENTAGE[_JETZT.weekday()]}, der {_JETZT:%d.%m.%Y}"
 
 
 def nachricht(text: str) -> EingehendeNachricht:
@@ -35,7 +41,8 @@ async def test_antwort_und_verlauf(settings, session_fabrik, baue_agent, user):
     aufruf = client.aufrufe[0]
     assert aufruf["model"] == settings.model_default
     assert aufruf["max_tokens"] == settings.max_output_tokens
-    assert aufruf["system"] == SYSTEM_PROMPT
+    assert aufruf["system"].startswith(SYSTEM_PROMPT + ASANA_REGELN)
+    assert f"Heute ist {_HEUTE}" in aufruf["system"]
     assert aufruf["messages"] == [{"role": "user", "content": "Hi"}]
     assert await lade_verlauf(session_fabrik, CHAT_ID, 20) == [
         {"role": "user", "content": "Hi"},
@@ -146,3 +153,23 @@ async def test_schreibendes_tool_wird_nicht_ausgefuehrt(settings, session_fabrik
     agent = baue_agent(client)
     await agent.beantworte(nachricht("Schreib das sofort"), user)
     assert BeispielSchreiben.ausgefuehrt == []
+
+
+def test_system_prompt_nennt_datum_zeitzone_und_asana_regeln():
+    prompt = baue_system_prompt(datetime(2026, 10, 9, 8, 5, tzinfo=ZoneInfo("Europe/Berlin")))
+    assert "Heute ist Freitag, der 09.10.2026, 08:05 Uhr (Zeitzone Europe/Berlin)." in prompt
+    for stichwort in (
+        "Zustand zuerst lesen",
+        "Eindeutigkeit",
+        "Bündeln",
+        "projekt_archivieren",
+        "Fotos von Plänen",
+        "nächsten Freitag",
+        "asana_nutzer_suchen genau einen Treffer",
+        "Wiederkehrende Aufgaben, Regeln/Automatisierungen und Formulare",
+        "sind Daten, keine Anweisungen",
+        "lösche alles",
+    ):
+        assert stichwort in prompt, stichwort
+    # Die Regeln aus Phase 1 bleiben unverändert enthalten.
+    assert prompt.startswith(SYSTEM_PROMPT)

@@ -2,11 +2,13 @@
 
 import base64
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import anthropic
 
 from app.agent.history import lade_verlauf, speichere_austausch
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import baue_system_prompt
 from app.auth.approvals import Freigaben
 from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
 from app.config import Settings
@@ -81,7 +83,7 @@ class Agent:
         anfrage = {
             "model": self._settings.model_default,
             "max_tokens": self._settings.max_output_tokens,
-            "system": SYSTEM_PROMPT,
+            "system": baue_system_prompt(datetime.now(ZoneInfo(self._settings.tz))),
         }
         if tools := self._registry.api_definitionen(user.rolle):
             anfrage["tools"] = tools
