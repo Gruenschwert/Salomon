@@ -332,3 +332,58 @@ async def test_telegram_zeigt_die_rueckfrage_mit_eigenen_buttons(
     await kanal._bei_klick(_update(ADMIN_ID, query=zweiter), None)
     assert gesendet[-1][0].startswith("✅ Asana-Änderungssatz ausgeführt")
     assert len(fake.aufrufe("DELETE")) == 2
+
+
+async def test_agent_schleife_fuehrt_auch_loeschsaetze_nicht_ohne_freigabe_aus(
+    baue, kontext, admin, fake, session_fabrik, kosten
+):
+    from app.agent.loop import WARTET_AUF_FREIGABE_TEXT, Agent
+    from app.channels.base import EingehendeNachricht
+    from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_block
+
+    akontext = asana_kontext(kontext, fake)
+    registry = lade_registry(akontext)
+    client = FakeAnthropic(
+        claude_antwort(tool_use_block(NAME, {"operationen": LOESCHSATZ})),
+        claude_antwort(text_block("Bitte bestätige das Löschen.")),
+    )
+    agent = Agent(
+        akontext.settings, session_fabrik, client, registry, Freigaben(akontext, registry), kosten
+    )
+    antwort = await agent.beantworte(
+        EingehendeNachricht(chat_id=1, absender_id=ADMIN_ID, absender_name="A", text="lösch"),
+        admin,
+    )
+    (anfrage,) = antwort.freigaben
+    assert "2 🗑 löschen" in anfrage.vorschau_text
+    assert _geschrieben(fake) == []
+    (ergebnis,) = client.aufrufe[1]["messages"][-1]["content"]
+    assert ergebnis["content"] == WARTET_AUF_FREIGABE_TEXT
+
+
+async def test_abgelehnter_loeschvorschlag_geht_als_fehler_an_claude(
+    baue, kontext, user, fake, session_fabrik, kosten
+):
+    from app.agent.loop import Agent
+    from app.channels.base import EingehendeNachricht
+    from tests.conftest import ERLAUBT_ID
+    from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_block
+
+    akontext = asana_kontext(kontext, fake)
+    registry = lade_registry(akontext)
+    client = FakeAnthropic(
+        claude_antwort(tool_use_block(NAME, {"operationen": LOESCHSATZ})),
+        claude_antwort(text_block("Das darfst du nicht.")),
+    )
+    agent = Agent(
+        akontext.settings, session_fabrik, client, registry, Freigaben(akontext, registry), kosten
+    )
+    antwort = await agent.beantworte(
+        EingehendeNachricht(chat_id=1, absender_id=ERLAUBT_ID, absender_name="U", text="lösch"),
+        user,
+    )
+    assert antwort.freigaben == ()
+    (ergebnis,) = client.aufrufe[1]["messages"][-1]["content"]
+    assert ergebnis["is_error"] is True
+    assert "darf in Asana nichts löschen" in ergebnis["content"]
+    assert fake.anfragen == []

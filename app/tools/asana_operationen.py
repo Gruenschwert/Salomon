@@ -267,7 +267,12 @@ def _pruefe_wert(feld: str, wert: object, leer_erlaubt: bool) -> object:
     if feld in LISTEN_FELDER:
         if not isinstance(wert, list) or not all(isinstance(w, str | int) for w in wert):
             raise ToolFehler(f"„{feld}“ muss eine Liste von GIDs sein.")
-        return [str(w).strip() for w in wert] or None
+        werte = [str(w).strip() for w in wert]
+        if feld == "follower":
+            for eintrag in werte:
+                if eintrag != ICH:
+                    pruefe_gid(eintrag, feld)
+        return werte or None
     if wert is None:
         return None
     if isinstance(wert, int) and not isinstance(wert, bool):
@@ -283,7 +288,7 @@ def _pruefe_wert(feld: str, wert: object, leer_erlaubt: bool) -> object:
         _parse_zeitpunkt(wert, UTC)
     elif feld == "farbe" and wert not in FARBEN:
         raise ToolFehler(f"Unbekannte Farbe. Erlaubt sind: {', '.join(FARBEN)}.")
-    elif feld in ("zustaendig_gid", "besitzer_gid", "team_gid") and wert != ICH:
+    elif feld == "team_gid" or (feld in ("zustaendig_gid", "besitzer_gid") and wert != ICH):
         pruefe_gid(wert, feld)
     return wert
 

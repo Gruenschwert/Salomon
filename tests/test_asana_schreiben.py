@@ -618,3 +618,112 @@ async def test_ergebnis_landet_nach_dem_klick_im_verlauf(
     assert nachricht.inhalt.startswith("[Ergebnis der Freigabe]\n✅ Asana-Änderungssatz")
     # Ohne vorherige Nutzer-Nachricht bleibt der Verlauf für die API trotzdem gültig.
     assert await lade_verlauf(session_fabrik, 5, 20) == []
+
+
+# ---------------------------------------------------------------- Ergänzungen
+
+
+async def test_aufgabe_in_bestehendem_abschnitt_findet_das_projekt_selbst(
+    afreigaben, tool, user, fake
+):
+    fake.route("POST", "/tasks", {"gid": "930", "permalink_url": "https://app.asana.com/0/1/930"})
+    op = {"operation": "aufgabe_anlegen", "name": "Muster", "abschnitt": "202", "meilenstein": True}
+    vorschau = await tool.bereite_vor(operationen=[op])
+    assert vorschau.splitlines()[1] == (
+        "1. Anlegen: Meilenstein „Muster“ in „Launch“ / „In Arbeit“, ohne Zuständigen"
+    )
+    await _freigeben(afreigaben, tool, user, [op])
+    assert fake.koerper("POST", "/tasks") == [
+        {
+            "name": "Muster",
+            "resource_subtype": "milestone",
+            "memberships": [{"project": "100", "section": "202"}],
+        }
+    ]
+
+
+async def test_aufgabe_ohne_projekt_landet_im_workspace(afreigaben, tool, user, fake):
+    fake.route("POST", "/tasks", {"gid": "931"})
+    op = {"operation": "aufgabe_anlegen", "name": "Lose Aufgabe", "zustaendig_gid": "me"}
+    fake.route("GET", "/users/me", {"gid": "501", "name": "Theis"})
+    assert "ohne Projekt, zuständig Theis (ich)" in await tool.bereite_vor(operationen=[op])
+    await _freigeben(afreigaben, tool, user, [op])
+    assert fake.koerper("POST", "/tasks") == [
+        {"name": "Lose Aufgabe", "assignee": "me", "workspace": "ws1"}
+    ]
+
+
+async def test_projekt_nutzt_das_standard_team(kontext, fake, user):
+    akontext = asana_kontext(kontext, fake, asana_default_team_gid="77")
+    registry = lade_registry(akontext)
+    tool, freigaben = registry.hole(NAME), Freigaben(akontext, registry)
+    fake.route("GET", "/teams/77", {"gid": "77", "name": "Marketing"})
+    fake.route("GET", "/teams/78", {"gid": "78", "name": "Vertrieb"})
+    fake.route("POST", "/projects", {"gid": "900"})
+    standard = {"operation": "projekt_anlegen", "name": "A", "faellig": "2026-11-02"}
+    eigenes = {"operation": "projekt_anlegen", "name": "B", "team_gid": "78"}
+
+    vorschau = await tool.bereite_vor(operationen=[standard, eigenes])
+    assert "1. Anlegen: Projekt „A“ (Team „Marketing“, fällig Mo 02.11.2026)" in vorschau
+    assert "2. Anlegen: Projekt „B“ (Team „Vertrieb“)" in vorschau
+    await _freigeben(freigaben, tool, user, [standard, eigenes])
+    assert [k["team"] for k in fake.koerper("POST", "/projects")] == ["77", "78"]
+
+
+async def test_nutzer_gids_koennen_keinen_pfad_einschleusen(tool, fake):
+    for feld, wert in (
+        ("follower", ["../tasks/7"]),
+        ("zustaendig_gid", "501/../../tasks"),
+        ("tags", ["41?x=1"]),
+    ):
+        with pytest.raises(ToolFehler, match="gültige Asana-GID"):
+            await tool.bereite_vor(
+                operationen=[{"operation": "aufgabe_anlegen", "name": "x", feld: wert}]
+            )
+    assert fake.anfragen == []
+
+
+async def test_token_steht_auch_bei_fehlern_in_keinem_log_und_keiner_meldung(
+    afreigaben, tool, user, fake, session_fabrik, caplog
+):
+    import logging
+
+    fake.route("PUT", "/tasks/7", httpx.ConnectError(f"Bearer {ASANA_TOKEN}"))
+    fake.route(
+        "POST",
+        "/tasks/7/stories",
+        httpx.Response(401, json={"errors": [{"message": f"Token {ASANA_TOKEN} ungültig"}]}),
+    )
+    with caplog.at_level(logging.DEBUG):
+        erste = await _freigeben(
+            afreigaben, tool, user, [{"operation": "aufgabe_erledigen", "gid": "7"}]
+        )
+        zweite = await _freigeben(
+            afreigaben,
+            tool,
+            user,
+            [{"operation": "kommentar_hinzufuegen", "aufgabe_gid": "7", "text": "x"}],
+        )
+    assert "abgebrochen" in erste.text
+    assert "Asana-Zugriff verweigert" in zweite.text
+    assert ASANA_TOKEN not in erste.text + zweite.text + caplog.text
+    for eintrag in await _audit(session_fabrik):
+        assert ASANA_TOKEN not in f"{eintrag.parameter}{eintrag.ergebnis_kurz}{eintrag.fehler}"
+
+
+async def test_ergebnis_kommt_an_auch_wenn_telegram_den_klick_nicht_mehr_quittiert(
+    akanal, afreigaben, tool, user, fake
+):
+    from telegram.error import BadRequest
+
+    from tests.test_telegram import FakeQuery, _update
+
+    class AlterKlick(FakeQuery):
+        async def answer(self, text=None, show_alert=False):
+            raise BadRequest("Query is too old and response timeout expired")
+
+    _plan_routen(fake)
+    anfrage = await _anfrage(afreigaben, tool, user, PLAN)
+    query = AlterKlick(f"freigabe:{anfrage.approval_id}:ja")
+    await akanal._bei_klick(_update(ERLAUBT_ID, query=query), None)
+    assert akanal.gesendet[-1][0].startswith("✅ Asana-Änderungssatz ausgeführt: 4 angelegt.")

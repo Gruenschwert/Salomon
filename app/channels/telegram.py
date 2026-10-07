@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -340,8 +341,13 @@ class TelegramKanal:
         if not entscheidung.abgeschlossen:
             await query.answer(entscheidung.text, show_alert=True)
             return
-        await query.answer()
-        await query.edit_message_reply_markup(reply_markup=None)
+        # Ein großer Änderungssatz läuft länger, als Telegram auf die Quittung des Klicks
+        # wartet. Das Ergebnis muss den Nutzer trotzdem erreichen.
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError as exc:
+            log.warning("Klick konnte nicht quittiert werden: %s", type(exc).__name__)
         if entscheidung.rueckfrage:
             if update.effective_chat is not None:
                 await self.sende_loesch_rueckfrage(
