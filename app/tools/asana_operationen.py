@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, tzinfo
 from zoneinfo import ZoneInfo
 
+from app.tools import asana_feldwerte
 from app.tools.asana_client import AsanaClient, AsanaFehler, kuerze_text, pruefe_gid
 from app.tools.base import ToolFehler, ToolKontext
 
@@ -63,7 +64,7 @@ BOOL_FELDER = {"meilenstein", "erledigt", "archiviert", "entfernen", "aus_projek
 # Listen von Texten (GIDs, Namen oder feste Werte)
 LISTEN_FELDER = {"tags", "follower"}
 ZAHL_FELDER: set[str] = set()
-OBJEKT_FELDER: set[str] = set()
+OBJEKT_FELDER: set[str] = {"felder"}
 DATUM_FELDER = {"faellig", "startdatum"}
 ZEIT_FELDER = {"faellig_um", "startzeit"}
 # Felder mit einer GID, die kein Platzhalter sein kann
@@ -105,6 +106,7 @@ _AUFGABE_FELDER = (
     "memberships.section.name",
     "permalink_url",
     "num_subtasks",
+    *(f"custom_fields.{feld}" for feld in asana_feldwerte.FELD_FELDER),
 )
 _PROJEKT_FELDER = ("name", "notes", "due_on", "owner.name", "color", "archived", "permalink_url")
 
@@ -131,6 +133,8 @@ class Lauf:
         self.zone = ZoneInfo(self.settings.tz)
         # Platzhalter -> Stellvertreter des noch nicht existierenden Objekts
         self.neu: dict[str, dict] = {}
+        # Für Listen, die je Lauf nur einmal gelesen werden (Nutzer, Felder)
+        self.zwischenspeicher: dict = {}
         self._gelesen: dict[tuple[str, str], dict] = {}
 
     async def hole(self, typ: str, ref: str, pfad: str, felder: tuple[str, ...]) -> dict:
@@ -162,6 +166,43 @@ class Lauf:
 
     async def team(self, gid: str) -> dict:
         return await self.hole("team", gid, "/teams", ("name",))
+
+    async def nutzer_aufloesen(self, wert: object) -> dict:
+        """Findet einen Nutzer über GID, „me“, Namen oder E-Mail. Rät nicht bei Mehrdeutigkeit."""
+        text = str(wert).strip() if isinstance(wert, str | int) else ""
+        if not text:
+            raise ToolFehler("Ein Nutzer fehlt.")
+        if text == ICH or (text.isascii() and text.isdigit()):
+            return await self.nutzer(text)
+        if "nutzer" not in self.zwischenspeicher:
+            alle, _ = await self.asana.liste(
+                "/users",
+                {"workspace": await self.asana.workspace_gid()},
+                felder=("name", "email"),
+                max_eintraege=500,
+            )
+            self.zwischenspeicher["nutzer"] = alle
+        alle = self.zwischenspeicher["nutzer"]
+        suche = text.casefold()
+        treffer = [
+            n
+            for n in alle
+            if suche in ((n.get("name") or "").casefold(), (n.get("email") or "").casefold())
+        ] or [
+            n
+            for n in alle
+            if suche in (n.get("name") or "").casefold()
+            or suche in (n.get("email") or "").casefold()
+        ]
+        if len(treffer) == 1:
+            return treffer[0]
+        if not treffer:
+            raise ToolFehler(f"Einen Asana-Nutzer „{text}“ gibt es nicht.")
+        auswahl = ", ".join(f"{n.get('name', '')} ({n['gid']})" for n in treffer[:10])
+        raise ToolFehler(
+            f"Der Nutzer „{text}“ ist nicht eindeutig: {auswahl}. Bitte den Nutzer fragen, wer "
+            "gemeint ist, und die GID verwenden."
+        )
 
 
 Vorschau = Callable[[dict, Lauf], Awaitable[str]]
@@ -377,10 +418,14 @@ def loese_platzhalter_auf(op: dict, gids: dict[str, str]) -> dict:
             return gids[wert]
         return wert
 
-    return {
+    aufgeloest = {
         feld: ersetze(wert) if feld == "gid" or feld in REF_FELDER else wert
         for feld, wert in op.items()
     }
+    # Benutzerdefinierte Felder können über den Platzhalter eines neuen Feldes benannt sein.
+    if isinstance(aufgeloest.get("felder"), dict):
+        aufgeloest["felder"] = {ersetze(k): v for k, v in aufgeloest["felder"].items()}
+    return aufgeloest
 
 
 # --------------------------------------------------------------------------------------
@@ -606,6 +651,26 @@ async def _ort_text(op: dict, lauf: Lauf) -> tuple[str, dict | None]:
         return "", None
     text = f"in {bez(projekt)}" + (f" / {bez(abschnitt)}" if abschnitt else "")
     return text, projekt
+
+
+async def _feldwerte(op: dict, lauf: Lauf, aufgabe: dict | None = None) -> list:
+    """Benutzerdefinierte Felder einer Aufgaben-Operation als (Feld, API-Wert, Text)."""
+    if "felder" not in op:
+        return []
+    if aufgabe is not None:
+        verfuegbar = None if aufgabe.get("neu") else aufgabe.get("custom_fields") or []
+        ort = "an dieser Aufgabe"
+    else:
+        projekt = op.get("projekt")
+        if not projekt and "abschnitt" in op:
+            projekt = ((await lauf.abschnitt(op["abschnitt"])).get("project") or {}).get("gid")
+        ort = "im Projekt der Aufgabe"
+        # Bei einem neuen Projekt des Satzes oder ganz ohne Projekt zählt der Workspace.
+        if projekt and projekt not in lauf.neu:
+            verfuegbar = await asana_feldwerte.projekt_felder(lauf, projekt)
+        else:
+            verfuegbar = None
+    return await asana_feldwerte.loese_felder_auf(lauf, op["felder"], verfuegbar, ort)
 
 
 def _stellvertreter(op: dict, **extra) -> dict:
@@ -870,6 +935,7 @@ _AUFGABEN_FELDER_OP = {
     "zustaendig_gid",
     "tags",
     "follower",
+    "felder",
 }
 
 
@@ -912,6 +978,8 @@ class AufgabeAnlegen:
         if "follower" in op:
             namen = [await _nutzer_name(lauf, gid) for gid in op["follower"]]
             teile.append("Follower " + ", ".join(namen))
+        for feld, _, text in await _feldwerte(op, lauf):
+            teile.append(f"Feld {q(feld.get('name'))}: {text}")
         if "beschreibung" in op:
             teile.append("mit Beschreibung")
         merke_neu(op, lauf, memberships=[])
@@ -935,6 +1003,8 @@ class AufgabeAnlegen:
             daten["tags"] = op["tags"]
         if "follower" in op:
             daten["followers"] = op["follower"]
+        if werte := await _feldwerte(op, lauf):
+            daten["custom_fields"] = {feld["gid"]: wert for feld, wert, _ in werte}
         neu = await lauf.asana.post("/tasks", daten, felder=("name", "permalink_url"))
         return OpErgebnis(
             gid=neu["gid"],
@@ -962,6 +1032,8 @@ class AufgabeAendern:
     def _vorher(aufgabe: dict, daten: dict, op: dict) -> dict:
         vorher = {}
         for feld in daten:
+            if feld == "custom_fields":
+                continue
             if feld == "assignee":
                 vorher["zustaendig"] = (aufgabe.get("assignee") or {}).get("name", "")
             elif feld == "notes":
@@ -1006,6 +1078,9 @@ class AufgabeAendern:
                 neu = _termin_text(daten, zeit_feld, datum_feld, lauf.zone)
                 if alt != neu:
                     teile.append(f"{label} {alt} → {neu}")
+        for feld, _, text in await _feldwerte(op, lauf, aufgabe):
+            alt = feld.get("display_value") or LEER
+            teile.append(f"Feld {q(feld.get('name'))}: {alt} → {text}")
         if "uebergeordnet" in op:
             teile.append(f"wird Unteraufgabe von {bez(await lauf.aufgabe(op['uebergeordnet']))}")
         if "projekt" in op or "abschnitt" in op:
@@ -1025,6 +1100,11 @@ class AufgabeAendern:
         vorher = AufgabeAendern._vorher(aufgabe, daten, op)
         # Eine Operation kann mehrere Aufrufe brauchen. Scheitert ein späterer, wird gemeldet,
         # was davor schon geändert wurde.
+        if werte := await _feldwerte(op, lauf, aufgabe):
+            daten["custom_fields"] = {feld["gid"]: wert for feld, wert, _ in werte}
+            vorher["felder"] = {
+                feld.get("name", ""): feld.get("display_value") for feld, *_ in werte
+            }
         erledigt: list[str] = []
         try:
             if daten:
