@@ -1,10 +1,18 @@
 """Schnittstelle eines Kanals: Nachricht rein / Antwort raus / Freigabe-Anfrage."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from app.db.models import User
+
+
+@dataclass(frozen=True)
+class Bild:
+    """Ein Foto im Arbeitsspeicher. Bilder werden nie dauerhaft gespeichert."""
+
+    medientyp: str
+    daten: bytes = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -12,7 +20,9 @@ class EingehendeNachricht:
     chat_id: int
     absender_id: int
     absender_name: str
+    # Bei Fotos: die Bildunterschrift
     text: str
+    bilder: tuple[Bild, ...] = ()
 
 
 @dataclass(frozen=True)

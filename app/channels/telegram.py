@@ -1,8 +1,10 @@
 """Telegram-Adapter (Long Polling, Inline-Buttons)."""
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -18,7 +20,13 @@ from app import __version__
 from app.agent.history import speichere_hinweis
 from app.auth.approvals import Freigaben
 from app.auth.users import finde_erlaubten_nutzer
-from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage, NachrichtenHandler
+from app.channels.base import (
+    Antwort,
+    Bild,
+    EingehendeNachricht,
+    FreigabeAnfrage,
+    NachrichtenHandler,
+)
 from app.config import Settings
 from app.db.models import ROLLE_ADMIN
 from app.db.session import SessionFabrik
@@ -35,6 +43,26 @@ KLICK_NEIN = "nein"
 KLICK_LOESCHEN = "loeschen"
 FEHLER_TEXT = "Es ist ein interner Fehler aufgetreten. Bitte versuche es später erneut."
 NUR_ADMIN_TEXT = "Dieser Befehl ist Admins vorbehalten."
+MAX_FOTOS = 5
+# So lange wird nach dem letzten Foto eines Albums auf weitere gewartet.
+ALBUM_WARTEZEIT_SEKUNDEN = 1.5
+FOTO_UNLESBAR_TEXT = (
+    "Dieses Bildformat kann ich nicht lesen. Bitte schicke das Foto als JPEG oder PNG."
+)
+ZU_VIELE_FOTOS_TEXT = f"Hinweis: Ich habe nur die ersten {MAX_FOTOS} Fotos berücksichtigt."
+
+
+@dataclass
+class _Album:
+    """Fotos einer Telegram-Mediengruppe, die noch gesammelt werden."""
+
+    chat_id: int
+    absender_id: int
+    absender_name: str
+    # (message_id, größtes Foto der Nachricht)
+    fotos: list[tuple[int, object]] = field(default_factory=list)
+    bildunterschrift: str = ""
+    aufgabe: asyncio.Task | None = None
 
 
 class TelegramKanal:
@@ -56,6 +84,8 @@ class TelegramKanal:
         self._alarme = alarme
         self._beim_start = beim_start
         self._gestartet = time.monotonic()
+        self._alben: dict[tuple[int, str], _Album] = {}
+        self.album_wartezeit = ALBUM_WARTEZEIT_SEKUNDEN
         self.application = (
             Application.builder()
             .token(settings.telegram_bot_token.get_secret_value())
@@ -66,6 +96,7 @@ class TelegramKanal:
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._bei_nachricht)
         )
+        self.application.add_handler(MessageHandler(filters.PHOTO, self._bei_foto))
         self.application.add_handler(
             CallbackQueryHandler(self._bei_klick, pattern=rf"^{KLICK_PRAEFIX}:\d+:\w+$")
         )
@@ -179,10 +210,106 @@ class TelegramKanal:
             await self.sende_antwort(nachricht.chat_id, FEHLER_TEXT)
             await self._melde_fehler("Nachricht", exc)
             return
+        await self._sende(nachricht.chat_id, antwort)
+
+    async def _sende(self, chat_id: int, antwort: Antwort | None) -> None:
         if antwort is not None:
-            await self.sende_antwort(nachricht.chat_id, antwort.text)
+            await self.sende_antwort(chat_id, antwort.text)
             for anfrage in antwort.freigaben:
-                await self.sende_freigabe_anfrage(nachricht.chat_id, anfrage)
+                await self.sende_freigabe_anfrage(chat_id, anfrage)
+
+    async def _bei_foto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        nachricht = update.effective_message
+        if update.effective_user is None or update.effective_chat is None or not nachricht.photo:
+            return
+        # Fotos von Nutzern außerhalb der Whitelist werden wie Text ignoriert – und gar nicht
+        # erst heruntergeladen.
+        absender = update.effective_user
+        if await self._erlaubter_nutzer(absender.id, absender.full_name) is None:
+            return
+        chat_id = update.effective_chat.id
+        foto = groesstes_foto(nachricht.photo)
+        if not nachricht.media_group_id:
+            await self._verarbeite_fotos(
+                chat_id, absender.id, absender.full_name, [foto], nachricht.caption or ""
+            )
+            return
+        # Album: Telegram schickt jedes Foto als eigene Nachricht. Sie werden gesammelt und
+        # kurz nach dem letzten als eine Anfrage übergeben.
+        schluessel = (chat_id, nachricht.media_group_id)
+        album = self._alben.setdefault(schluessel, _Album(chat_id, absender.id, absender.full_name))
+        album.fotos.append((nachricht.message_id, foto))
+        album.bildunterschrift = album.bildunterschrift or nachricht.caption or ""
+        if album.aufgabe is not None:
+            album.aufgabe.cancel()
+        album.aufgabe = asyncio.create_task(self._album_abschliessen(schluessel))
+
+    async def _album_abschliessen(self, schluessel: tuple[int, str]) -> None:
+        await asyncio.sleep(self.album_wartezeit)
+        album = self._alben.pop(schluessel)
+        fotos = [foto for _, foto in sorted(album.fotos, key=lambda eintrag: eintrag[0])]
+        await self._verarbeite_fotos(
+            album.chat_id, album.absender_id, album.absender_name, fotos, album.bildunterschrift
+        )
+
+    async def _verarbeite_fotos(
+        self, chat_id: int, absender_id: int, absender_name: str, fotos: list, text: str
+    ) -> None:
+        """Lädt die Fotos in den Arbeitsspeicher und übergibt sie als eine Anfrage.
+
+        Die Bilder werden nirgends gespeichert; nach der Verarbeitung sind sie verworfen.
+        """
+        max_mb = self._settings.photo_max_mb
+        max_bytes = int(max_mb * 1024 * 1024)
+        hinweise = []
+        if len(fotos) > MAX_FOTOS:
+            fotos = fotos[:MAX_FOTOS]
+            hinweise.append(ZU_VIELE_FOTOS_TEXT)
+        try:
+            bilder: list[Bild] = []
+            zu_gross = unlesbar = 0
+            for foto in fotos:
+                if (foto.file_size or 0) > max_bytes:
+                    zu_gross += 1
+                    continue
+                daten = bytes(await (await foto.get_file()).download_as_bytearray())
+                if len(daten) > max_bytes:
+                    zu_gross += 1
+                elif (typ := medientyp(daten)) is None:
+                    unlesbar += 1
+                else:
+                    bilder.append(Bild(typ, daten))
+            if zu_gross:
+                if len(fotos) == 1:
+                    hinweise.append(
+                        f"Das Foto ist größer als {max_mb:g} MB. Bitte schicke ein kleineres Foto."
+                    )
+                else:
+                    hinweise.append(
+                        f"{zu_gross} der Fotos sind größer als {max_mb:g} MB und wurden nicht "
+                        "berücksichtigt. Bitte schicke kleinere Fotos."
+                    )
+            if unlesbar:
+                hinweise.append(FOTO_UNLESBAR_TEXT)
+            antwort = None
+            if bilder:
+                antwort = await self.verarbeite(
+                    EingehendeNachricht(
+                        chat_id=chat_id,
+                        absender_id=absender_id,
+                        absender_name=absender_name,
+                        text=text,
+                        bilder=tuple(bilder),
+                    )
+                )
+        except Exception as exc:
+            log.exception("Unbehandelter Fehler bei der Verarbeitung eines Fotos")
+            await self.sende_antwort(chat_id, FEHLER_TEXT)
+            await self._melde_fehler("Foto", exc)
+            return
+        for hinweis in hinweise:
+            await self.sende_antwort(chat_id, hinweis)
+        await self._sende(chat_id, antwort)
 
     async def _bei_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or update.effective_chat is None:
@@ -234,6 +361,24 @@ class TelegramKanal:
     async def _bei_fehler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("Unbehandelter Fehler im Telegram-Adapter", exc_info=context.error)
         await self._melde_fehler("Telegram", context.error)
+
+
+def groesstes_foto(fotos):
+    """Telegram liefert jedes Foto in mehreren Größen; verwendet wird die größte Auflösung."""
+    return max(fotos, key=lambda foto: foto.width * foto.height)
+
+
+def medientyp(daten: bytes) -> str | None:
+    """Erkennt den Medientyp am Dateianfang; None bei Formaten, die Claude nicht liest."""
+    if daten.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if daten.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if daten.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if daten[:4] == b"RIFF" and daten[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def teile_text(text: str, maximum: int = TELEGRAM_MAX_ZEICHEN) -> list[str]:

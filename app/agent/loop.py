@@ -1,5 +1,6 @@
 """Agent-Schleife."""
 
+import base64
 import logging
 
 import anthropic
@@ -33,6 +34,8 @@ DIENST_FEHLER_TEXT = "Der KI-Dienst ist gerade nicht erreichbar. Bitte versuche 
 ABLEHNUNG_TEXT = "Diese Anfrage kann ich nicht beantworten."
 LEERE_ANTWORT_TEXT = "Dazu habe ich keine Antwort erhalten. Bitte formuliere die Frage neu."
 GEKUERZT_HINWEIS = "\n\n(Antwort wurde wegen der Längenbegrenzung gekürzt.)"
+FOTO_MARKE = "[Foto]"
+FOTO_OHNE_TEXT = "Bitte lies dieses Foto."
 
 
 class Agent:
@@ -59,7 +62,7 @@ class Agent:
         verlauf = await lade_verlauf(
             self._session_fabrik, nachricht.chat_id, self._settings.history_max_messages
         )
-        messages = [*verlauf, {"role": "user", "content": nachricht.text}]
+        messages = [*verlauf, {"role": "user", "content": _inhalt(nachricht)}]
         # Freigaben, die in dieser Runde angelegt wurden; der Kanal zeigt sie mit Buttons an.
         anfragen: list[FreigabeAnfrage] = []
         try:
@@ -68,7 +71,7 @@ class Agent:
             log.exception("Claude-Aufruf fehlgeschlagen")
             return Antwort(text=DIENST_FEHLER_TEXT, freigaben=tuple(anfragen))
         await speichere_austausch(
-            self._session_fabrik, nachricht.chat_id, user.id, nachricht.text, text
+            self._session_fabrik, nachricht.chat_id, user.id, _verlaufstext(nachricht), text
         )
         return Antwort(text=text, freigaben=tuple(anfragen))
 
@@ -130,6 +133,33 @@ class Agent:
             log.exception("Freigabe für Tool %s konnte nicht angelegt werden", name)
             return ToolErgebnis(f"Interner Fehler im Tool {name}.", fehler=True)
         return ToolErgebnis(WARTET_AUF_FREIGABE_TEXT)
+
+
+def _inhalt(nachricht: EingehendeNachricht) -> str | list[dict]:
+    """Inhalt der Nutzer-Nachricht für Claude; Fotos gehen als base64-Bildblöcke mit."""
+    if not nachricht.bilder:
+        return nachricht.text
+    bloecke: list[dict] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": bild.medientyp,
+                "data": base64.standard_b64encode(bild.daten).decode("ascii"),
+            },
+        }
+        for bild in nachricht.bilder
+    ]
+    bloecke.append({"type": "text", "text": nachricht.text or FOTO_OHNE_TEXT})
+    return bloecke
+
+
+def _verlaufstext(nachricht: EingehendeNachricht) -> str:
+    """Im Verlauf steht statt des Bildes nur „[Foto]“ plus Bildunterschrift."""
+    if not nachricht.bilder:
+        return nachricht.text
+    marken = " ".join([FOTO_MARKE] * len(nachricht.bilder))
+    return f"{marken} {nachricht.text}".strip()
 
 
 def _tokens(usage: anthropic.types.Usage) -> tuple[int, int]:
