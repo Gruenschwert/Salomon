@@ -336,7 +336,7 @@ async def test_freigabe_fuehrt_aus_und_ersetzt_platzhalter(
     # 14:30 Uhr in Berlin (Sommerzeit) sind 12:30 Uhr UTC.
     assert zweite == {
         "name": "Angebot einholen",
-        "due_at": "2026-10-15T12:30:00.000Z",
+        "due_at": "2026-10-15T12:30:00Z",
         "parent": "920",
     }
     assert await _op_status(session_fabrik) == [

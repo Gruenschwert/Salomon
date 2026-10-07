@@ -75,7 +75,7 @@ REF_FELDER = {
     "tags": "tag",
 }
 # In aufgabe_aendern und projekt_aendern löscht ein leerer Wert das Feld.
-LEERBAR = frozenset({"startdatum", "start_um", "faellig", "faellig_um", "zustaendig_gid"})
+LEERBAR = frozenset({"startdatum", "startzeit", "faellig", "faellig_um", "zustaendig_gid"})
 
 _AUFGABE_FELDER = (
     "name",
@@ -285,7 +285,7 @@ def _pruefe_wert(feld: str, wert: object, leer_erlaubt: bool) -> object:
         return None
     if feld in ("faellig", "startdatum"):
         _parse_datum(wert, feld)
-    elif feld in ("faellig_um", "start_um"):
+    elif feld in ("faellig_um", "startzeit"):
         _parse_zeitpunkt(wert, UTC, feld)
     elif feld == "farbe" and wert not in FARBEN:
         raise ToolFehler(f"Unbekannte Farbe. Erlaubt sind: {', '.join(FARBEN)}.")
@@ -364,7 +364,7 @@ def _parse_zeitpunkt(wert: str, zone: tzinfo, feld: str = "faellig_um") -> datet
 def _asana_zeitpunkt(wert: str, zone: ZoneInfo, feld: str = "faellig_um") -> str:
     """ISO 8601 in UTC; die Ortszeit wird samt Sommer-/Winterzeit umgerechnet."""
     zeitpunkt = _parse_zeitpunkt(wert, zone, feld)
-    return zeitpunkt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return zeitpunkt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def datum_text(wert: str | None) -> str:
@@ -418,25 +418,28 @@ def _termin_aus_bestand(aufgabe: dict, zeit_feld: str, datum_feld: str) -> Termi
 def _termin_daten(op: dict, zone: ZoneInfo, aufgabe: dict | None = None) -> dict:
     """Start und Fälligkeit für den Asana-Body, vorab geprüft.
 
-    Asana erlaubt nur drei Kombinationen: Zeitfenster (start_at + due_at), Fälligkeit allein
-    (due_at oder due_on) und Datumsbereich (start_on + due_on). Ändert eine Operation nur
-    Start oder nur Ende, kommt der andere Wert aus dem aktuellen Zustand der Aufgabe, damit
-    immer eine dieser Kombinationen gesendet wird.
+    Regeln der Asana-API (developers.asana.com/reference/createtask): start_on und start_at
+    nie zusammen, due_on und due_at nie zusammen. Wird ein Start gesetzt oder entfernt, muss
+    das Ende im selben Request stehen; start_at verlangt due_at. Gesendet werden deshalb nur
+    drei Formen: Zeitfenster (start_at + due_at), Fälligkeit allein (due_at oder due_on) und
+    ganze Tage (start_on + due_on). Start ohne Uhrzeit mit Ende mit Uhrzeit lehnt Asana am
+    selben Tag ab und wird hier nie gesendet. Ändert eine Operation nur Start oder nur Ende,
+    kommt der andere Wert aus dem aktuellen Zustand der Aufgabe.
     """
-    start_neu, start = _termin_aus_op(op, "startdatum", "start_um", zone)
+    start_neu, start = _termin_aus_op(op, "startdatum", "startzeit", zone)
     ende_neu, ende = _termin_aus_op(op, "faellig", "faellig_um", zone)
     if not (start_neu or ende_neu):
         return {}
     # Eine im selben Satz neu angelegte Aufgabe hat noch keinen lesbaren Zustand.
     bestand_bekannt = aufgabe is not None and not aufgabe.get("neu")
-    hatte_start = False
+    alter_start = altes_ende = None
     if bestand_bekannt:
         alter_start = _termin_aus_bestand(aufgabe, "start_at", "start_on")
-        hatte_start = alter_start is not None
+        altes_ende = _termin_aus_bestand(aufgabe, "due_at", "due_on")
         if not start_neu:
             start = alter_start
         if not ende_neu:
-            ende = _termin_aus_bestand(aufgabe, "due_at", "due_on")
+            ende = altes_ende
     # Bei einer neuen Aufgabe des Satzes ist die nicht angefasste Seite unbekannt.
     ende_bekannt = ende_neu or bestand_bekannt or aufgabe is None
 
@@ -455,10 +458,21 @@ def _termin_daten(op: dict, zone: ZoneInfo, aufgabe: dict | None = None) -> dict
             )
     if start is not None and ende is not None:
         if start[0] != ende[0]:
+            if start[0] == NUR_DATUM:
+                grund = (
+                    "Der Start hat keine Uhrzeit, das Ende schon. Das lehnt Asana ab. Frage "
+                    "den Nutzer nach der Startuhrzeit und sende dann „startzeit“ zusammen mit "
+                    "„faellig_um“."
+                )
+            else:
+                grund = (
+                    "Der Start hat eine Uhrzeit, das Ende nicht. Asana verlangt dann auch ein "
+                    "Ende mit Uhrzeit. Frage den Nutzer nach der Enduhrzeit und sende dann "
+                    "„startzeit“ zusammen mit „faellig_um“."
+                )
             raise ToolFehler(
                 "Start und Fälligkeit müssen beide mit oder beide ohne Uhrzeit angegeben sein. "
-                "Für ein Zeitfenster „start_um“ und „faellig_um“ verwenden, für ganze Tage "
-                f"„startdatum“ und „faellig“.{hinweis}"
+                f"{grund} Schreibe die Uhrzeit nicht ersatzweise in die Beschreibung.{hinweis}"
             )
         if start[0] == MIT_UHRZEIT:
             falsch = _parse_zeitpunkt(start[1], zone) >= _parse_zeitpunkt(ende[1], zone)
@@ -467,15 +481,24 @@ def _termin_daten(op: dict, zone: ZoneInfo, aufgabe: dict | None = None) -> dict
         if falsch:
             raise ToolFehler(f"Der Start muss vor der Fälligkeit liegen.{hinweis}")
 
+    meilenstein = op.get("meilenstein")
+    if meilenstein is None and bestand_bekannt:
+        meilenstein = aufgabe.get("resource_subtype") == "milestone"
+    if start is not None and meilenstein:
+        raise ToolFehler("Ein Meilenstein ist ein einzelner Zeitpunkt und kann keinen Start haben.")
+
+    # Das Ende steht immer im Body, sobald ein Start gesetzt oder entfernt wird. Entfernt wird
+    # über das Feld, das bisher gesetzt war (start_at mit due_at, sonst start_on).
     daten: dict = {}
     if ende is not None:
         daten["due_at" if ende[0] == MIT_UHRZEIT else "due_on"] = ende[1]
     elif ende_neu:
-        daten["due_on"] = None
+        daten["due_at" if altes_ende and altes_ende[0] == MIT_UHRZEIT else "due_on"] = None
     if start is not None:
         daten["start_at" if start[0] == MIT_UHRZEIT else "start_on"] = start[1]
-    elif start_neu or hatte_start:
-        daten["start_on"] = None
+    elif start_neu or alter_start is not None:
+        mit_uhrzeit = bool(alter_start and alter_start[0] == MIT_UHRZEIT and "due_on" not in daten)
+        daten["start_at" if mit_uhrzeit else "start_on"] = None
     return daten
 
 
@@ -792,7 +815,7 @@ _AUFGABEN_FELDER_OP = {
     "uebergeordnet",
     "meilenstein",
     "startdatum",
-    "start_um",
+    "startzeit",
     "faellig",
     "faellig_um",
     "zustaendig_gid",

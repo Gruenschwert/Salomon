@@ -80,15 +80,15 @@ class AsanaAenderungenAusfuehren(BasisTool):
         "- abschnitt_anlegen: projekt, name, vor_abschnitt_gid\n"
         "- abschnitt_umbenennen: gid, name\n"
         "- aufgabe_anlegen: name, beschreibung, projekt, abschnitt, uebergeordnet (macht sie "
-        "zur Unteraufgabe), meilenstein, startdatum, start_um, faellig, faellig_um, "
+        "zur Unteraufgabe), meilenstein, startdatum, startzeit, faellig, faellig_um, "
         "zustaendig_gid, tags, follower. Termine gibt es in genau drei Formen: (1) nur "
         "Fälligkeit: faellig (JJJJ-MM-TT) ODER faellig_um (Datum plus Uhrzeit, z. B. "
         "2026-10-15T14:30); (2) ganze Tage von–bis: startdatum + faellig; (3) Zeitfenster "
-        "von–bis mit Uhrzeit: start_um + faellig_um. Start ohne Uhrzeit und Fälligkeit mit "
+        "von–bis mit Uhrzeit: startzeit + faellig_um. Start ohne Uhrzeit und Fälligkeit mit "
         "Uhrzeit (oder umgekehrt) lassen sich nicht mischen. Uhrzeiten sind Ortszeit "
         "Europe/Berlin\n"
         "- aufgabe_aendern: gid plus jedes Feld aus aufgabe_anlegen. Ein leerer Wert löscht "
-        "startdatum, start_um, faellig, faellig_um oder zustaendig_gid. Wird nur Start oder "
+        "startdatum, startzeit, faellig, faellig_um oder zustaendig_gid. Wird nur Start oder "
         "nur Fälligkeit geändert, bleibt der andere Wert, muss aber in der Form dazu passen. "
         "tags und follower werden "
         "hinzugefügt, Vorhandenes bleibt; projekt/abschnitt fügen die Aufgabe zusätzlich hinzu\n"
@@ -150,10 +150,11 @@ class AsanaAenderungenAusfuehren(BasisTool):
                             "description": "Nutzer-GID oder „me“",
                         },
                         "startdatum": {"type": ["string", "null"], "description": "JJJJ-MM-TT"},
-                        "start_um": {
+                        "startzeit": {
                             "type": ["string", "null"],
                             "description": "Beginn eines Zeitfensters, JJJJ-MM-TTTHH:MM, "
-                            "Ortszeit Europe/Berlin; nur zusammen mit faellig_um",
+                            "Ortszeit Europe/Berlin; nur zusammen mit faellig_um, nie zusammen "
+                            "mit startdatum",
                         },
                         "faellig": {"type": ["string", "null"], "description": "JJJJ-MM-TT"},
                         "faellig_um": {

@@ -270,7 +270,7 @@ class AsanaAufgabeDetails(AsanaLeseTool):
             **_aufgabe_kurz(aufgabe),
             "beschreibung": kuerze_text(aufgabe.get("notes"), MAX_BESCHREIBUNG_ZEICHEN),
             "startdatum": aufgabe.get("start_on"),
-            "start_um": aufgabe.get("start_at"),
+            "startzeit": aufgabe.get("start_at"),
             "meilenstein": aufgabe.get("resource_subtype") == "milestone",
             "uebergeordnet": _gid_und_name(aufgabe.get("parent")),
             "tags": [_gid_und_name(t) for t in aufgabe.get("tags") or []],
