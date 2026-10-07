@@ -61,6 +61,8 @@ def lade_registry(kontext: ToolKontext, paket: ModuleType = app.tools) -> Regist
                 issubclass(klasse, BasisTool)
                 and klasse is not BasisTool
                 and klasse.__module__ == modul.__name__
+                # Gemeinsame Basisklassen ohne eigenen Namen sind keine Tools.
+                and getattr(klasse, "name", None)
             ):
                 tools.append(klasse(kontext))
     return Registry(tools)

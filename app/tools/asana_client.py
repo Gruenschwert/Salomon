@@ -192,6 +192,16 @@ class AsanaClient:
         return text.replace(self._token(), MASKIERT)[:MAX_FEHLERTEXT_ZEICHEN]
 
 
+def pruefe_gid(wert: object, feld: str = "gid") -> str:
+    """GIDs landen im URL-Pfad und müssen deshalb rein numerisch sein."""
+    text = str(wert).strip() if isinstance(wert, str | int) else ""
+    if not text.isascii() or not text.isdigit():
+        raise ToolFehler(
+            f"„{feld}“ ist keine gültige Asana-GID. GIDs stammen immer aus einem Lese-Tool."
+        )
+    return text
+
+
 def _mit_feldern(params: dict | None, felder: Sequence[str]) -> dict:
     params = {k: v for k, v in (params or {}).items() if v is not None}
     if felder:
