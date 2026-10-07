@@ -51,3 +51,42 @@ def test_standardwerte(monkeypatch):
     assert settings.max_tool_iterations == 8
     assert settings.history_max_messages == 20
     assert settings.tz == "Europe/Berlin"
+
+
+def test_asana_standardwerte(monkeypatch):
+    _setze(monkeypatch)
+    settings = Settings(_env_file=None)
+    assert settings.asana_token.get_secret_value() == ""
+    assert settings.asana_workspace_gid == ""
+    assert settings.asana_max_ops_per_changeset == 100
+    assert settings.asana_max_deletes_per_changeset == 20
+    assert settings.asana_delete_enabled is True
+    assert settings.asana_delete_roles == {"admin"}
+    assert settings.photo_max_mb == 5
+    assert settings.anthropic_workspace_id == ""
+
+
+def test_asana_werte_aus_umgebung(monkeypatch):
+    _setze(
+        monkeypatch,
+        ASANA_TOKEN="asana-geheim",
+        ASANA_DELETE_ROLES="admin, user",
+        ASANA_DELETE_ENABLED="false",
+        ASANA_MAX_OPS_PER_CHANGESET="10",
+    )
+    settings = Settings(_env_file=None)
+    assert settings.asana_delete_roles == {"admin", "user"}
+    assert settings.asana_delete_enabled is False
+    assert settings.asana_max_ops_per_changeset == 10
+    assert "asana-geheim" not in repr(settings)
+
+
+def test_env_example_hat_keine_kommentare_hinter_werten():
+    from pathlib import Path
+
+    zeilen = (Path(__file__).parent.parent / ".env.example").read_text().splitlines()
+    for zeile in zeilen:
+        if zeile and not zeile.startswith("#"):
+            assert "#" not in zeile, zeile
+    for name in ("ASANA_TOKEN=", "ANTHROPIC_API_KEY=", "TELEGRAM_BOT_TOKEN=", "POSTGRES_PASSWORD="):
+        assert name in zeilen

@@ -9,29 +9,33 @@ from app.agent.loop import Agent
 from app.auth.approvals import Freigaben
 from app.auth.users import synchronisiere_whitelist
 from app.channels.telegram import TelegramKanal
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db.session import db_check, erstelle_engine, erstelle_session_fabrik
 from app.observability.alerts import Alarme
 from app.observability.costs import Kosten
+from app.observability.geheimnisse import richte_logging_ein
 from app.tools.base import ToolKontext
 from app.tools.registry import lade_registry
 
 log = logging.getLogger(__name__)
 
 
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+def erstelle_anthropic_client(settings: Settings) -> anthropic.AsyncAnthropic:
+    kopfzeilen = {}
+    if workspace_id := settings.anthropic_workspace_id.strip():
+        kopfzeilen["anthropic-workspace-id"] = workspace_id
+    return anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key.get_secret_value(), default_headers=kopfzeilen or None
     )
-    # httpx protokolliert auf INFO jede URL – die der Telegram-API enthält den Bot-Token.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpx2").setLevel(logging.WARNING)
 
+
+def main() -> None:
     settings = get_settings()
+    richte_logging_ein(settings)
     engine = erstelle_engine(settings.database_url.get_secret_value())
     session_fabrik = erstelle_session_fabrik(engine)
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
+    client = erstelle_anthropic_client(settings)
     kontext = ToolKontext(settings=settings, session_fabrik=session_fabrik)
     registry = lade_registry(kontext)
     alarme = Alarme(session_fabrik)

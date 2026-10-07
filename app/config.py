@@ -8,6 +8,7 @@ from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 IdListe = Annotated[frozenset[int], NoDecode]
+RollenListe = Annotated[frozenset[str], NoDecode]
 
 
 class Settings(BaseSettings):
@@ -20,6 +21,8 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: SecretStr
+    # Optional: wird als Header `anthropic-workspace-id` mitgeschickt
+    anthropic_workspace_id: str = ""
     model_default: str
     model_cheap: str
     max_tool_iterations: int = 8
@@ -42,6 +45,18 @@ class Settings(BaseSettings):
     shopify_kiffkraut_token: SecretStr = SecretStr("")
     shopify_api_version: str = ""
 
+    # Asana
+    asana_token: SecretStr = SecretStr("")
+    asana_workspace_gid: str = ""
+    asana_default_team_gid: str = ""
+    asana_max_ops_per_changeset: int = 100
+    asana_max_deletes_per_changeset: int = 20
+    asana_delete_enabled: bool = True
+    asana_delete_roles: RollenListe = frozenset({"admin"})
+
+    # Foto-Eingang
+    photo_max_mb: float = 5
+
     tz: str = "Europe/Berlin"
 
     @field_validator("telegram_allowed_user_ids", "telegram_admin_user_ids", mode="before")
@@ -49,6 +64,13 @@ class Settings(BaseSettings):
     def _ids_aus_kommaliste(cls, wert: object) -> object:
         if isinstance(wert, str):
             return frozenset(int(teil) for teil in wert.split(",") if teil.strip())
+        return wert
+
+    @field_validator("asana_delete_roles", mode="before")
+    @classmethod
+    def _rollen_aus_kommaliste(cls, wert: object) -> object:
+        if isinstance(wert, str):
+            return frozenset(teil.strip() for teil in wert.split(",") if teil.strip())
         return wert
 
     @model_validator(mode="after")
