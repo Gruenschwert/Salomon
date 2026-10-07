@@ -1,5 +1,6 @@
 """Datenbank-Modelle (Bauplan Abschnitt 7, plus `notizen` für das Demo-Tool und
-`asana_operationen` für den Ausführungsstand von Asana-Änderungssätzen)."""
+`asana_operationen` für den Ausführungsstand von Asana-Änderungssätzen und
+`telegram_dateien` für Verweise auf Dateien aus dem Chat)."""
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -142,3 +143,21 @@ class AsanaOperation(Base):
     gid: Mapped[str | None] = mapped_column(String(40), nullable=True)
     fehler: Mapped[str | None] = mapped_column(Text, nullable=True)
     ausgefuehrt_am: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+class TelegramDatei(Base):
+    """Verweis auf eine Datei, die ein Nutzer im Chat geschickt hat.
+
+    Gespeichert wird nur, wo die Datei bei Telegram liegt – nie ihr Inhalt.
+    """
+
+    __tablename__ = "telegram_dateien"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    file_id: Mapped[str] = mapped_column(String(300))
+    name: Mapped[str] = mapped_column(String(300))
+    medientyp: Mapped[str] = mapped_column(String(100), default="")
+    groesse: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    erstellt_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)

@@ -16,6 +16,16 @@ class Bild:
 
 
 @dataclass(frozen=True)
+class DateiHinweis:
+    """Verweis auf eine Datei aus dem Chat, die sich später an Asana anhängen lässt."""
+
+    verweis: str
+    name: str
+    medientyp: str
+    groesse: int | None
+
+
+@dataclass(frozen=True)
 class EingehendeNachricht:
     chat_id: int
     absender_id: int
@@ -23,6 +33,7 @@ class EingehendeNachricht:
     # Bei Fotos: die Bildunterschrift
     text: str
     bilder: tuple[Bild, ...] = ()
+    dateien: tuple[DateiHinweis, ...] = ()
 
 
 @dataclass(frozen=True)

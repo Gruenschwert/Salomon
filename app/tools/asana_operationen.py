@@ -11,9 +11,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, tzinfo
 from zoneinfo import ZoneInfo
 
-from app.config import Settings
 from app.tools.asana_client import AsanaClient, AsanaFehler, kuerze_text, pruefe_gid
-from app.tools.base import ToolFehler
+from app.tools.base import ToolFehler, ToolKontext
 
 PLATZHALTER_MUSTER = re.compile(r"^\$[A-Za-z0-9_]{1,30}$")
 ICH = "me"
@@ -58,10 +57,24 @@ KATEGORIEN = (
     KATEGORIE_LOESCHEN,
 )
 
-BOOL_FELDER = frozenset(
-    {"meilenstein", "erledigt", "archiviert", "entfernen", "aus_projekt_entfernen"}
-)
-LISTEN_FELDER = frozenset({"tags", "follower"})
+# Typen der Felder. Die Module mit weiteren Operationen tragen ihre Felder hier ein; ein
+# Feldname hat in allen Operationen denselben Typ. Alles Übrige ist Text.
+BOOL_FELDER = {"meilenstein", "erledigt", "archiviert", "entfernen", "aus_projekt_entfernen"}
+# Listen von Texten (GIDs, Namen oder feste Werte)
+LISTEN_FELDER = {"tags", "follower"}
+ZAHL_FELDER: set[str] = set()
+OBJEKT_FELDER: set[str] = set()
+DATUM_FELDER = {"faellig", "startdatum"}
+ZEIT_FELDER = {"faellig_um", "startzeit"}
+# Felder mit einer GID, die kein Platzhalter sein kann
+GID_FELDER = {"team_gid"}
+# Nutzer-Felder: GID oder „me“
+NUTZER_GID_FELDER = {"zustaendig_gid", "besitzer_gid"}
+# Felder mit fester Auswahl: Feldname -> erlaubte Werte
+WAHL_FELDER: dict[str, tuple[str, ...]] = {}
+# Beiträge der Operationen zu Schema und Beschreibung des Schreib-Tools
+ZUSATZ_SCHEMA: dict[str, dict] = {}
+ZUSATZ_BESCHREIBUNG: list[str] = []
 # Felder, die auf ein Asana-Objekt verweisen, mit dem Typ des Objekts. `gid` hängt von der
 # Operation ab und steht deshalb im OpTyp.
 REF_FELDER = {
@@ -111,15 +124,17 @@ class Lauf:
     """Zustand während einer Vorschau oder Ausführung: Asana-Zugriff, Zwischenspeicher für
     gelesene Objekte und – nur in der Vorschau – die im Satz neu angelegten Objekte."""
 
-    def __init__(self, asana: AsanaClient, settings: Settings) -> None:
+    def __init__(self, asana: AsanaClient, kontext: ToolKontext) -> None:
         self.asana = asana
-        self.settings = settings
-        self.zone = ZoneInfo(settings.tz)
+        self.kontext = kontext
+        self.settings = kontext.settings
+        self.zone = ZoneInfo(self.settings.tz)
         # Platzhalter -> Stellvertreter des noch nicht existierenden Objekts
         self.neu: dict[str, dict] = {}
         self._gelesen: dict[tuple[str, str], dict] = {}
 
-    async def _hole(self, typ: str, ref: str, pfad: str, felder: tuple[str, ...]) -> dict:
+    async def hole(self, typ: str, ref: str, pfad: str, felder: tuple[str, ...]) -> dict:
+        """Liest ein Objekt einmal je Lauf; `pfad` ist die Sammlung, z. B. „/tasks“."""
         if ref in self.neu:
             return self.neu[ref]
         if (typ, ref) not in self._gelesen:
@@ -131,22 +146,22 @@ class Lauf:
         self._gelesen.pop((typ, gid), None)
 
     async def projekt(self, ref: str) -> dict:
-        return await self._hole("projekt", ref, "/projects", _PROJEKT_FELDER)
+        return await self.hole("projekt", ref, "/projects", _PROJEKT_FELDER)
 
     async def abschnitt(self, ref: str) -> dict:
-        return await self._hole("abschnitt", ref, "/sections", ("name", "project.name"))
+        return await self.hole("abschnitt", ref, "/sections", ("name", "project.name"))
 
     async def aufgabe(self, ref: str) -> dict:
-        return await self._hole("aufgabe", ref, "/tasks", _AUFGABE_FELDER)
+        return await self.hole("aufgabe", ref, "/tasks", _AUFGABE_FELDER)
 
     async def tag(self, ref: str) -> dict:
-        return await self._hole("tag", ref, "/tags", ("name",))
+        return await self.hole("tag", ref, "/tags", ("name",))
 
     async def nutzer(self, gid: str) -> dict:
-        return await self._hole("nutzer", gid, "/users", ("name",))
+        return await self.hole("nutzer", gid, "/users", ("name",))
 
     async def team(self, gid: str) -> dict:
-        return await self._hole("team", gid, "/teams", ("name",))
+        return await self.hole("team", gid, "/teams", ("name",))
 
 
 Vorschau = Callable[[dict, Lauf], Awaitable[str]]
@@ -165,18 +180,24 @@ class OpTyp:
     erzeugt: str | None = None
     # Typ des Objekts, auf das `gid` verweist
     gid_typ: str | None = None
+    # Felder, bei denen ein leerer Wert „löschen“ bedeutet
+    leerbar: frozenset[str] = frozenset()
+    # Name der Einstellung mit den Rollen, die diese Operation vorschlagen dürfen
+    rollen: str | None = None
 
 
 OP_TYPEN: dict[str, OpTyp] = {}
 
 
-def _registriere(
+def registriere(
     art: str,
     kategorie: str,
     pflicht: set[str],
     optional: set[str] = frozenset(),
     erzeugt: str | None = None,
     gid_typ: str | None = None,
+    leerbar: set[str] = frozenset(),
+    rollen: str | None = None,
 ) -> Callable[[type], type]:
     def dekorator(klasse: type) -> type:
         OP_TYPEN[art] = OpTyp(
@@ -188,10 +209,22 @@ def _registriere(
             ausfuehren=klasse.ausfuehren,
             erzeugt=erzeugt,
             gid_typ=gid_typ,
+            leerbar=frozenset(leerbar),
+            rollen=rollen,
         )
         return klasse
 
     return dekorator
+
+
+_registriere = registriere
+
+
+def kategorie_von(op: dict) -> str:
+    """Kategorie einer Operation; beim allgemeinen API-Aufruf hängt sie von der Methode ab."""
+    if op.get("operation") == "api_aufruf":
+        return KATEGORIE_LOESCHEN if op.get("methode") == "DELETE" else KATEGORIE_AENDERN
+    return OP_TYPEN[op["operation"]].kategorie
 
 
 # --------------------------------------------------------------------------------------
@@ -228,20 +261,19 @@ def _pruefe_operation(roh: object, bekannt: dict[str, str]) -> dict:
         erlaubt |= {"platzhalter"}
     if unbekannt := sorted(set(roh) - erlaubt):
         raise ToolFehler(f"{art} kennt die Felder {', '.join(unbekannt)} nicht.")
-    aenderung = art in ("aufgabe_aendern", "projekt_aendern")
     op: dict = {"operation": art}
     for feld in sorted(typ.pflicht | typ.optional):
         if feld not in roh:
             if feld in typ.pflicht:
                 raise ToolFehler(f"Das Feld „{feld}“ fehlt.")
             continue
-        wert = _pruefe_wert(feld, roh[feld], leer_erlaubt=aenderung and feld in LEERBAR)
-        if wert is None and not (aenderung and feld in LEERBAR):
+        wert = _pruefe_wert(feld, roh[feld])
+        if wert is None and feld not in typ.leerbar:
             if feld in typ.pflicht:
                 raise ToolFehler(f"Das Feld „{feld}“ ist leer.")
             continue
         ref_typ = typ.gid_typ if feld == "gid" else REF_FELDER.get(feld)
-        if typ.kategorie == KATEGORIE_LOESCHEN and str(wert).startswith("$"):
+        if typ.kategorie == KATEGORIE_LOESCHEN and ref_typ and str(wert).startswith("$"):
             raise ToolFehler(
                 "Gelöscht wird nur mit einer GID aus einem Lese-Tool, nie mit Platzhalter."
             )
@@ -260,22 +292,34 @@ def _pruefe_operation(roh: object, bekannt: dict[str, str]) -> dict:
     return op
 
 
-def _pruefe_wert(feld: str, wert: object, leer_erlaubt: bool) -> object:
+def _pruefe_wert(feld: str, wert: object) -> object:
     if feld in BOOL_FELDER:
         if not isinstance(wert, bool):
             raise ToolFehler(f"„{feld}“ muss true oder false sein.")
         return wert
     if feld in LISTEN_FELDER:
         if not isinstance(wert, list) or not all(isinstance(w, str | int) for w in wert):
-            raise ToolFehler(f"„{feld}“ muss eine Liste von GIDs sein.")
-        werte = [str(w).strip() for w in wert]
-        if feld == "follower":
-            for eintrag in werte:
-                if eintrag != ICH:
-                    pruefe_gid(eintrag, feld)
+            raise ToolFehler(f"„{feld}“ muss eine Liste von Texten sein.")
+        werte = [str(w).strip() for w in wert if str(w).strip()]
+        for eintrag in werte:
+            if feld == "follower" and eintrag != ICH:
+                pruefe_gid(eintrag, feld)
+            if feld in WAHL_FELDER and eintrag not in WAHL_FELDER[feld]:
+                raise ToolFehler(
+                    f"„{eintrag}“ ist in „{feld}“ nicht erlaubt. Erlaubt sind: "
+                    f"{', '.join(WAHL_FELDER[feld])}."
+                )
         return werte or None
     if wert is None:
         return None
+    if feld in ZAHL_FELDER:
+        if isinstance(wert, bool) or not isinstance(wert, int | float):
+            raise ToolFehler(f"„{feld}“ muss eine Zahl sein.")
+        return wert
+    if feld in OBJEKT_FELDER:
+        if not isinstance(wert, dict):
+            raise ToolFehler(f"„{feld}“ muss ein Objekt sein.")
+        return wert or None
     if isinstance(wert, int) and not isinstance(wert, bool):
         wert = str(wert)
     if not isinstance(wert, str):
@@ -283,13 +327,17 @@ def _pruefe_wert(feld: str, wert: object, leer_erlaubt: bool) -> object:
     wert = wert.strip()
     if not wert:
         return None
-    if feld in ("faellig", "startdatum"):
+    if feld in DATUM_FELDER:
         _parse_datum(wert, feld)
-    elif feld in ("faellig_um", "startzeit"):
+    elif feld in ZEIT_FELDER:
         _parse_zeitpunkt(wert, UTC, feld)
     elif feld == "farbe" and wert not in FARBEN:
         raise ToolFehler(f"Unbekannte Farbe. Erlaubt sind: {', '.join(FARBEN)}.")
-    elif feld == "team_gid" or (feld in ("zustaendig_gid", "besitzer_gid") and wert != ICH):
+    elif feld in WAHL_FELDER and wert not in WAHL_FELDER[feld]:
+        raise ToolFehler(
+            f"„{wert}“ ist in „{feld}“ nicht erlaubt. Erlaubt sind: {', '.join(WAHL_FELDER[feld])}."
+        )
+    elif feld in GID_FELDER or (feld in NUTZER_GID_FELDER and wert != ICH):
         pruefe_gid(wert, feld)
     return wert
 
@@ -304,12 +352,12 @@ def _pruefe_ref(feld: str, ref: str, ref_typ: str, bekannt: dict[str, str]) -> N
         )
     if bekannt[ref] != ref_typ:
         raise ToolFehler(
-            f"Der Platzhalter {ref} in „{feld}“ steht für {_TYP_NAME[bekannt[ref]]}, "
-            f"erwartet wird {_TYP_NAME[ref_typ]}."
+            f"Der Platzhalter {ref} in „{feld}“ steht für {TYP_NAME[bekannt[ref]]}, "
+            f"erwartet wird {TYP_NAME.get(ref_typ, ref_typ)}."
         )
 
 
-_TYP_NAME = {
+TYP_NAME = {
     "projekt": "ein Projekt",
     "abschnitt": "einen Abschnitt",
     "aufgabe": "eine Aufgabe",
@@ -636,6 +684,7 @@ _PROJEKT_LABEL = {
     pflicht={"gid"},
     optional={"name", "beschreibung", "faellig", "besitzer_gid", "farbe"},
     gid_typ="projekt",
+    leerbar=LEERBAR,
 )
 class ProjektAendern:
     @staticmethod
@@ -901,6 +950,7 @@ class AufgabeAnlegen:
     pflicht={"gid"},
     optional=_AUFGABEN_FELDER_OP,
     gid_typ="aufgabe",
+    leerbar=LEERBAR,
 )
 class AufgabeAendern:
     @staticmethod
@@ -1243,7 +1293,7 @@ LOESCH_MARKE = "🗑 Löschen:"
 
 
 def ist_loeschung(op: dict) -> bool:
-    return OP_TYPEN[op["operation"]].kategorie == KATEGORIE_LOESCHEN
+    return kategorie_von(op) == KATEGORIE_LOESCHEN
 
 
 @_registriere("projekt_loeschen", KATEGORIE_LOESCHEN, pflicht={"gid"}, gid_typ="projekt")

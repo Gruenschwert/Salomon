@@ -15,6 +15,9 @@ from app.db.models import (
     jetzt,
 )
 from app.observability.audit import protokolliere
+
+# Die Module mit weiteren Operationen tragen sich beim Import in OP_TYPEN ein.
+from app.tools import asana_ops_anhaenge  # noqa: F401
 from app.tools.asana_client import AsanaClient
 from app.tools.asana_operationen import (
     FARBEN,
@@ -22,9 +25,12 @@ from app.tools.asana_operationen import (
     KATEGORIEN,
     LOESCH_MARKE,
     OP_TYPEN,
+    ZUSATZ_BESCHREIBUNG,
+    ZUSATZ_SCHEMA,
     Lauf,
     OpErgebnis,
     ist_loeschung,
+    kategorie_von,
     loese_platzhalter_auf,
     pruefe_operationen,
     q,
@@ -55,7 +61,7 @@ _VERGANGENHEIT = {
 
 def zusammenfassung(operationen: list[dict], vergangenheit: bool = False) -> str:
     """Zahlen je Kategorie, z. B. „12 anlegen, 3 ändern, 2 🗑 löschen“."""
-    anzahl = Counter(OP_TYPEN[op["operation"]].kategorie for op in operationen)
+    anzahl = Counter(kategorie_von(op) for op in operationen)
     teile = []
     for kategorie in KATEGORIEN:
         if anzahl[kategorie]:
@@ -101,7 +107,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
         "- projekt_loeschen, abschnitt_loeschen, aufgabe_loeschen: gid. Löschen braucht eine "
         "zweite Bestätigung des Nutzers und ist nicht rückgängig zu machen. Die GID muss aus "
         "einem Lese-Tool stammen, nie nach Name allein löschen. Abschnitte lassen sich nur "
-        "leer löschen\n"
+        "leer löschen\n" + "\n".join(ZUSATZ_BESCHREIBUNG) + "\n"
         "Platzhalter: Eine …_anlegen-Operation kann „platzhalter“ setzen ($p1 für Projekte, "
         "$s1 für Abschnitte, $a1 für Aufgaben, $t1 für Tags). Spätere Operationen desselben "
         "Satzes verwenden den Platzhalter überall dort, wo sonst eine GID steht. Alle anderen "
@@ -169,6 +175,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
                         "archiviert": {"type": "boolean"},
                         "entfernen": {"type": "boolean"},
                         "aus_projekt_entfernen": {"type": "boolean"},
+                        **ZUSATZ_SCHEMA,
                     },
                     "required": ["operation"],
                 },
@@ -191,8 +198,21 @@ class AsanaAenderungenAusfuehren(BasisTool):
                 f"{maximum}. Bitte in mehrere Sätze aufteilen."
             )
         ops = pruefe_operationen(operationen)
+        self._pruefe_rollen(ops)
         self._pruefe_loeschungen(ops)
         return ops
+
+    def _pruefe_rollen(self, ops: list[dict]) -> None:
+        """Manche Operationen sind bestimmten Rollen vorbehalten (z. B. Team-Verwaltung)."""
+        for op in ops:
+            einstellung = OP_TYPEN[op["operation"]].rollen
+            if einstellung is None:
+                continue
+            if aktueller_nutzer.get().rolle not in getattr(self.kontext.settings, einstellung):
+                raise ToolFehler(
+                    f"Die Operation {op['operation']} ist dieser Rolle nicht erlaubt "
+                    f"({einstellung.upper()})."
+                )
 
     def _pruefe_loeschungen(self, ops: list[dict]) -> None:
         anzahl = sum(1 for op in ops if ist_loeschung(op))
@@ -243,7 +263,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
         ops = self._pruefe(operationen)
         zeilen = [f"Asana-Änderungssatz: {zusammenfassung(ops)}"]
         async with self.asana as asana:
-            lauf = Lauf(asana, self.kontext.settings)
+            lauf = Lauf(asana, self.kontext)
             for nummer, op in enumerate(ops, start=1):
                 try:
                     zeile = await OP_TYPEN[op["operation"]].vorschau(op, lauf)
@@ -272,7 +292,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
         gids: dict[str, str] = {}
         link = projekt_link = ""
         async with self.asana as asana:
-            lauf = Lauf(asana, self.kontext.settings)
+            lauf = Lauf(asana, self.kontext)
             for eintrag, op in zip(eintraege, ops, strict=True):
                 await self._setze(approval_id, eintrag["nr"], status=OP_LAEUFT)
                 try:

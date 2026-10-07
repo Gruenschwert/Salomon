@@ -59,6 +59,7 @@ def main() -> None:
         beim_start=beim_start,
     )
     alarme.verbinde(kanal.sende_antwort)
+    kontext.dateien.verbinde(kanal.lade_datei)
     kanal.starte()
 
 

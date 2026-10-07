@@ -1,5 +1,6 @@
 """Tool-Schnittstelle."""
 
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
@@ -47,12 +48,34 @@ class ToolFehler(Exception):
     """Erwartbarer Fehler; die Meldung geht an Claude und darf keine internen Details enthalten."""
 
 
+DateiLader = Callable[[str], Awaitable[bytes]]
+
+
+class DateiQuelle:
+    """Zugriff auf Dateien, die ein Nutzer über den Kanal geschickt hat.
+
+    Die Tool-Schicht kennt den Kanal nicht; er meldet sich beim Start über `verbinde` an.
+    """
+
+    def __init__(self) -> None:
+        self._lader: DateiLader | None = None
+
+    def verbinde(self, lader: DateiLader) -> None:
+        self._lader = lader
+
+    async def lade(self, kennung: str) -> bytes:
+        if self._lader is None:
+            raise ToolFehler("Dateien aus dem Chat sind hier nicht erreichbar.")
+        return await self._lader(kennung)
+
+
 @dataclass(frozen=True)
 class ToolKontext:
     """Abhängigkeiten, die jedes Tool beim Erzeugen erhält."""
 
     settings: Settings
     session_fabrik: SessionFabrik
+    dateien: DateiQuelle = field(default_factory=DateiQuelle)
     # Nur für Tests: ersetzt die Netzwerkschicht von httpx.
     http_transport: httpx.AsyncBaseTransport | None = None
 

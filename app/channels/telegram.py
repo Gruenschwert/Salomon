@@ -25,12 +25,13 @@ from app.auth.users import finde_erlaubten_nutzer
 from app.channels.base import (
     Antwort,
     Bild,
+    DateiHinweis,
     EingehendeNachricht,
     FreigabeAnfrage,
     NachrichtenHandler,
 )
 from app.config import Settings
-from app.db.models import ROLLE_ADMIN
+from app.db.models import ROLLE_ADMIN, TelegramDatei
 from app.db.session import SessionFabrik
 from app.medien import bild_medientyp as medientyp
 from app.observability.alerts import Alarme
@@ -53,6 +54,14 @@ FOTO_UNLESBAR_TEXT = (
     "Dieses Bildformat kann ich nicht lesen. Bitte schicke das Foto als JPEG oder PNG."
 )
 ZU_VIELE_FOTOS_TEXT = f"Hinweis: Ich habe nur die ersten {MAX_FOTOS} Fotos berücksichtigt."
+MAX_DOKUMENTE = 10
+# Telegram gibt Bots nur Dateien bis 20 MB heraus.
+TELEGRAM_MAX_DOWNLOAD_MB = 20
+DATEI_ZU_GROSS_TEXT = (
+    f"Die Datei „{{name}}“ ist größer als {TELEGRAM_MAX_DOWNLOAD_MB} MB. So große Dateien gibt "
+    "Telegram nicht an Bots heraus. Bitte lade sie direkt in Asana hoch."
+)
+_ENDUNG = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
 
 
 @dataclass
@@ -64,6 +73,8 @@ class _Album:
     absender_name: str
     # (message_id, größtes Foto der Nachricht)
     fotos: list[tuple[int, object]] = field(default_factory=list)
+    # (message_id, Dokument)
+    dokumente: list[tuple[int, object]] = field(default_factory=list)
     bildunterschrift: str = ""
     aufgabe: asyncio.Task | None = None
 
@@ -100,6 +111,7 @@ class TelegramKanal:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._bei_nachricht)
         )
         self.application.add_handler(MessageHandler(filters.PHOTO, self._bei_foto))
+        self.application.add_handler(MessageHandler(filters.Document.ALL, self._bei_foto))
         self.application.add_handler(
             CallbackQueryHandler(self._bei_klick, pattern=rf"^{KLICK_PRAEFIX}:\d+:\w+$")
         )
@@ -112,6 +124,28 @@ class TelegramKanal:
     async def _nach_init(self, application: Application) -> None:
         if self._beim_start is not None:
             await self._beim_start()
+
+    async def lade_datei(self, file_id: str) -> bytes:
+        """Lädt eine Datei, die ein Nutzer geschickt hat, in den Arbeitsspeicher."""
+        datei = await self.application.bot.get_file(file_id)
+        return bytes(await datei.download_as_bytearray())
+
+    async def _merke_datei(
+        self, user_id: int, chat_id: int, file_id: str, name: str, typ: str, groesse: int | None
+    ) -> DateiHinweis:
+        """Hält fest, wo die Datei bei Telegram liegt. Der Inhalt wird nicht gespeichert."""
+        async with self._session_fabrik() as session:
+            eintrag = TelegramDatei(
+                user_id=user_id,
+                chat_id=chat_id,
+                file_id=file_id,
+                name=name[:300],
+                medientyp=typ[:100],
+                groesse=groesse,
+            )
+            session.add(eintrag)
+            await session.commit()
+        return DateiHinweis(f"datei:{eintrag.id}", eintrag.name, eintrag.medientyp, groesse)
 
     async def sende_antwort(self, chat_id: int, text: str) -> None:
         for teil in teile_text(text):
@@ -224,8 +258,14 @@ class TelegramKanal:
                 await self.sende_freigabe_anfrage(chat_id, anfrage)
 
     async def _bei_foto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Fotos und Dokumente; beides kann der Nutzer lesen lassen oder an Asana anhängen."""
         nachricht = update.effective_message
-        if update.effective_user is None or update.effective_chat is None or not nachricht.photo:
+        dokument = getattr(nachricht, "document", None)
+        if (
+            update.effective_user is None
+            or update.effective_chat is None
+            or not (nachricht.photo or dokument)
+        ):
             return
         # Fotos von Nutzern außerhalb der Whitelist werden wie Text ignoriert – und gar nicht
         # erst heruntergeladen.
@@ -233,17 +273,25 @@ class TelegramKanal:
         if await self._erlaubter_nutzer(absender.id, absender.full_name) is None:
             return
         chat_id = update.effective_chat.id
-        foto = groesstes_foto(nachricht.photo)
+        foto = groesstes_foto(nachricht.photo) if nachricht.photo else None
         if not nachricht.media_group_id:
             await self._verarbeite_fotos(
-                chat_id, absender.id, absender.full_name, [foto], nachricht.caption or ""
+                chat_id,
+                absender.id,
+                absender.full_name,
+                [foto] if foto else [],
+                nachricht.caption or "",
+                dokumente=[] if foto else [dokument],
             )
             return
         # Album: Telegram schickt jedes Foto als eigene Nachricht. Sie werden gesammelt und
         # kurz nach dem letzten als eine Anfrage übergeben.
         schluessel = (chat_id, nachricht.media_group_id)
         album = self._alben.setdefault(schluessel, _Album(chat_id, absender.id, absender.full_name))
-        album.fotos.append((nachricht.message_id, foto))
+        if foto:
+            album.fotos.append((nachricht.message_id, foto))
+        else:
+            album.dokumente.append((nachricht.message_id, dokument))
         album.bildunterschrift = album.bildunterschrift or nachricht.caption or ""
         if album.aufgabe is not None:
             album.aufgabe.cancel()
@@ -253,16 +301,30 @@ class TelegramKanal:
         await asyncio.sleep(self.album_wartezeit)
         album = self._alben.pop(schluessel)
         fotos = [foto for _, foto in sorted(album.fotos, key=lambda eintrag: eintrag[0])]
+        dokumente = [d for _, d in sorted(album.dokumente, key=lambda eintrag: eintrag[0])]
         await self._verarbeite_fotos(
-            album.chat_id, album.absender_id, album.absender_name, fotos, album.bildunterschrift
+            album.chat_id,
+            album.absender_id,
+            album.absender_name,
+            fotos,
+            album.bildunterschrift,
+            dokumente=dokumente,
         )
 
     async def _verarbeite_fotos(
-        self, chat_id: int, absender_id: int, absender_name: str, fotos: list, text: str
+        self,
+        chat_id: int,
+        absender_id: int,
+        absender_name: str,
+        fotos: list,
+        text: str,
+        dokumente: list | tuple = (),
     ) -> None:
         """Lädt die Fotos in den Arbeitsspeicher und übergibt sie als eine Anfrage.
 
         Die Bilder werden nirgends gespeichert; nach der Verarbeitung sind sie verworfen.
+        Zu Fotos und Dokumenten wird nur ein Verweis festgehalten, damit sie sich nach einer
+        Freigabe an Asana anhängen lassen. Dokumente werden hier gar nicht heruntergeladen.
         """
         max_mb = self._settings.photo_max_mb
         max_bytes = int(max_mb * 1024 * 1024)
@@ -271,7 +333,9 @@ class TelegramKanal:
             fotos = fotos[:MAX_FOTOS]
             hinweise.append(ZU_VIELE_FOTOS_TEXT)
         try:
+            user = await finde_erlaubten_nutzer(self._session_fabrik, absender_id)
             bilder: list[Bild] = []
+            dateien: list[DateiHinweis] = []
             zu_gross = unlesbar = 0
             for foto in fotos:
                 if (foto.file_size or 0) > max_bytes:
@@ -284,6 +348,32 @@ class TelegramKanal:
                     unlesbar += 1
                 else:
                     bilder.append(Bild(typ, daten))
+                    if user is not None and getattr(foto, "file_id", None):
+                        dateien.append(
+                            await self._merke_datei(
+                                user.id,
+                                chat_id,
+                                foto.file_id,
+                                f"foto_{len(bilder)}.{_ENDUNG[typ]}",
+                                typ,
+                                len(daten),
+                            )
+                        )
+            for dokument in list(dokumente)[:MAX_DOKUMENTE]:
+                name = dokument.file_name or "datei"
+                if (dokument.file_size or 0) > TELEGRAM_MAX_DOWNLOAD_MB * 1024 * 1024:
+                    hinweise.append(DATEI_ZU_GROSS_TEXT.format(name=name))
+                elif user is not None:
+                    dateien.append(
+                        await self._merke_datei(
+                            user.id,
+                            chat_id,
+                            dokument.file_id,
+                            name,
+                            dokument.mime_type or "",
+                            dokument.file_size,
+                        )
+                    )
             if zu_gross:
                 if len(fotos) == 1:
                     hinweise.append(
@@ -297,7 +387,7 @@ class TelegramKanal:
             if unlesbar:
                 hinweise.append(FOTO_UNLESBAR_TEXT)
             antwort = None
-            if bilder:
+            if bilder or dateien:
                 antwort = await self.verarbeite(
                     EingehendeNachricht(
                         chat_id=chat_id,
@@ -305,6 +395,7 @@ class TelegramKanal:
                         absender_name=absender_name,
                         text=text,
                         bilder=tuple(bilder),
+                        dateien=tuple(dateien),
                     )
                 )
         except Exception as exc:

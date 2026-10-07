@@ -30,6 +30,7 @@ TARIF_TEXT = (
     "darf das nicht."
 )
 DOWNLOAD_TIMEOUT_SEKUNDEN = 30.0
+UPLOAD_TIMEOUT_SEKUNDEN = 120.0
 NICHT_ERREICHBAR_TEXT = "Asana ist gerade nicht erreichbar."
 UNKLAR_TEXT = (
     "Asana hat nicht geantwortet. Ob die Änderung angekommen ist, ist unklar. "
@@ -105,6 +106,21 @@ class AsanaClient:
     async def delete(self, pfad: str) -> None:
         await self._anfrage("DELETE", pfad, {})
 
+    async def post_formular(
+        self,
+        pfad: str,
+        felder: dict[str, str],
+        datei: tuple[str, bytes, str] | None = None,
+    ) -> Any:
+        """POST als multipart/form-data (so verlangt es /attachments), ohne `data`-Hülle.
+
+        `datei` ist (Dateiname, Inhalt, Medientyp) und geht als Teil `file` mit.
+        """
+        teile: dict = {name: (None, wert) for name, wert in felder.items()}
+        if datei is not None:
+            teile["file"] = datei
+        return (await self._anfrage("POST", pfad, {}, formular=teile))["data"]
+
     async def workspace_gid(self) -> str:
         """Der konfigurierte Workspace oder der einzige, den der Token sieht."""
         if konfiguriert := self._kontext.settings.asana_workspace_gid.strip():
@@ -137,17 +153,25 @@ class AsanaClient:
         )
 
     async def _anfrage(
-        self, methode: str, pfad: str, params: dict, daten: dict | None = None
+        self,
+        methode: str,
+        pfad: str,
+        params: dict,
+        daten: dict | None = None,
+        formular: dict | None = None,
     ) -> dict:
         if self._http is None:
             async with self:
-                return await self._anfrage(methode, pfad, params, daten)
+                return await self._anfrage(methode, pfad, params, daten, formular)
         schreibend = methode != "GET"
-        koerper = {"data": daten} if daten is not None else None
+        if formular is not None:
+            inhalt = {"files": formular, "timeout": UPLOAD_TIMEOUT_SEKUNDEN}
+        else:
+            inhalt = {"json": {"data": daten} if daten is not None else None}
         wiederholungen = 0
         while True:
             try:
-                antwort = await self._http.request(methode, pfad, params=params, json=koerper)
+                antwort = await self._http.request(methode, pfad, params=params, **inhalt)
             except httpx.HTTPError as exc:
                 # Nur der Typ: Meldungstexte der Netzwerkschicht gehören nicht ins Log.
                 log.warning("Asana nicht erreichbar (%s %s): %s", methode, pfad, type(exc).__name__)

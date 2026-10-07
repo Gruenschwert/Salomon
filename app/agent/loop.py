@@ -14,6 +14,7 @@ from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
 from app.config import Settings
 from app.db.models import User
 from app.db.session import SessionFabrik
+from app.medien import groesse_text
 from app.observability.audit import protokolliere
 from app.observability.costs import Kosten
 from app.tools.base import ToolFehler, ToolKontext
@@ -38,6 +39,11 @@ LEERE_ANTWORT_TEXT = "Dazu habe ich keine Antwort erhalten. Bitte formuliere die
 GEKUERZT_HINWEIS = "\n\n(Antwort wurde wegen der Längenbegrenzung gekürzt.)"
 FOTO_MARKE = "[Foto]"
 FOTO_OHNE_TEXT = "Bitte lies dieses Foto."
+DATEI_OHNE_TEXT = "(Der Nutzer hat nichts dazu geschrieben.)"
+DATEIEN_KOPF = (
+    "[Dateien dieser Nachricht. Zum Anhängen an Asana den Verweis in anhang_hinzufuegen als "
+    "„datei“ angeben:]"
+)
 
 
 class Agent:
@@ -141,8 +147,9 @@ class Agent:
 
 def _inhalt(nachricht: EingehendeNachricht) -> str | list[dict]:
     """Inhalt der Nutzer-Nachricht für Claude; Fotos gehen als base64-Bildblöcke mit."""
+    text = _text_mit_dateien(nachricht, FOTO_OHNE_TEXT if nachricht.bilder else DATEI_OHNE_TEXT)
     if not nachricht.bilder:
-        return nachricht.text
+        return text
     bloecke: list[dict] = [
         {
             "type": "image",
@@ -154,16 +161,31 @@ def _inhalt(nachricht: EingehendeNachricht) -> str | list[dict]:
         }
         for bild in nachricht.bilder
     ]
-    bloecke.append({"type": "text", "text": nachricht.text or FOTO_OHNE_TEXT})
+    bloecke.append({"type": "text", "text": text})
     return bloecke
+
+
+def _text_mit_dateien(nachricht: EingehendeNachricht, ohne_text: str) -> str:
+    """Hängt die Verweise auf mitgeschickte Dateien an den Text der Nachricht."""
+    if not nachricht.dateien:
+        return nachricht.text or (ohne_text if nachricht.bilder else "")
+    zeilen = [nachricht.text or ohne_text, "", DATEIEN_KOPF]
+    zeilen += [
+        f"- {d.verweis}: „{d.name}“ ({d.medientyp or 'unbekannter Typ'}, {groesse_text(d.groesse)})"
+        for d in nachricht.dateien
+    ]
+    return "\n".join(zeilen)
 
 
 def _verlaufstext(nachricht: EingehendeNachricht) -> str:
     """Im Verlauf steht statt des Bildes nur „[Foto]“ plus Bildunterschrift."""
+    # Die Verweise bleiben im Verlauf, damit „häng das an Aufgabe X“ auch nach einer Rückfrage
+    # noch funktioniert. Gespeichert wird nur der Verweis, nie der Inhalt.
+    text = _text_mit_dateien(nachricht, "")
     if not nachricht.bilder:
-        return nachricht.text
+        return text.strip()
     marken = " ".join([FOTO_MARKE] * len(nachricht.bilder))
-    return f"{marken} {nachricht.text}".strip()
+    return f"{marken} {text}".strip()
 
 
 def _tokens(usage: anthropic.types.Usage) -> tuple[int, int]:
