@@ -17,7 +17,13 @@ from app.db.models import (
 from app.observability.audit import protokolliere
 
 # Die Module mit weiteren Operationen tragen sich beim Import in OP_TYPEN ein.
-from app.tools import asana_ops_anhaenge, asana_ops_felder, asana_ops_vorlagen  # noqa: F401
+from app.tools import (  # noqa: F401
+    asana_ops_anhaenge,
+    asana_ops_aufgaben,
+    asana_ops_felder,
+    asana_ops_mitglieder,
+    asana_ops_vorlagen,
+)
 from app.tools.asana_client import AsanaClient
 from app.tools.asana_operationen import (
     FARBEN,

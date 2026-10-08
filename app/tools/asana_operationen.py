@@ -68,7 +68,7 @@ OBJEKT_FELDER: set[str] = {"felder"}
 DATUM_FELDER = {"faellig", "startdatum"}
 ZEIT_FELDER = {"faellig_um", "startzeit"}
 # Felder mit einer GID, die kein Platzhalter sein kann
-GID_FELDER = {"team_gid"}
+GID_FELDER: set[str] = set()
 # Nutzer-Felder: GID oder „me“
 NUTZER_GID_FELDER = {"zustaendig_gid", "besitzer_gid"}
 # Felder mit fester Auswahl: Feldname -> erlaubte Werte
@@ -87,6 +87,7 @@ REF_FELDER = {
     "haengt_ab_von_gid": "aufgabe",
     "tag_gid": "tag",
     "tags": "tag",
+    "team_gid": "team",
 }
 # In aufgabe_aendern und projekt_aendern löscht ein leerer Wert das Feld.
 LEERBAR = frozenset({"startdatum", "startzeit", "faellig", "faellig_um", "zustaendig_gid"})
@@ -108,7 +109,27 @@ _AUFGABE_FELDER = (
     "num_subtasks",
     *(f"custom_fields.{feld}" for feld in asana_feldwerte.FELD_FELDER),
 )
-_PROJEKT_FELDER = ("name", "notes", "due_on", "owner.name", "color", "archived", "permalink_url")
+_PROJEKT_FELDER = (
+    "name",
+    "notes",
+    "due_on",
+    "owner.name",
+    "color",
+    "archived",
+    "permalink_url",
+    "privacy_setting",
+    "default_view",
+)
+# Sichtbarkeit eines Projekts: unser Wort -> privacy_setting laut Asana-Doku
+SICHTBARKEIT = {
+    "privat": "private",
+    "team": "private_to_team",
+    "oeffentlich": "public_to_workspace",
+}
+ANSICHTEN = ("list", "board", "calendar", "timeline")
+WAHL_FELDER["sichtbarkeit"] = tuple(SICHTBARKEIT)
+WAHL_FELDER["standardansicht"] = ANSICHTEN
+BOOL_FELDER.add("genehmigung")
 
 
 @dataclass(frozen=True)
@@ -403,6 +424,7 @@ TYP_NAME = {
     "abschnitt": "einen Abschnitt",
     "aufgabe": "eine Aufgabe",
     "tag": "einen Tag",
+    "team": "ein Team",
 }
 
 
@@ -628,8 +650,12 @@ def _aufgaben_daten(op: dict, zone: ZoneInfo, aufgabe: dict | None = None) -> di
         daten["name"] = op["name"]
     if "beschreibung" in op:
         daten["notes"] = op["beschreibung"]
-    if "meilenstein" in op:
-        daten["resource_subtype"] = "milestone" if op["meilenstein"] else "default_task"
+    if op.get("meilenstein") and op.get("genehmigung"):
+        raise ToolFehler("Eine Aufgabe ist entweder Meilenstein oder Genehmigung, nicht beides.")
+    if op.get("genehmigung"):
+        daten["resource_subtype"] = "approval"
+    elif "meilenstein" in op or "genehmigung" in op:
+        daten["resource_subtype"] = "milestone" if op.get("meilenstein") else "default_task"
     daten.update(_termin_daten(op, zone, aufgabe))
     if "zustaendig_gid" in op:
         daten["assignee"] = op["zustaendig_gid"]
@@ -740,6 +766,8 @@ _PROJEKT_LABEL = {
     "due_on": "Fällig",
     "owner": "Besitzer",
     "color": "Farbe",
+    "privacy_setting": "Sichtbarkeit",
+    "default_view": "Standardansicht",
 }
 
 
@@ -747,7 +775,16 @@ _PROJEKT_LABEL = {
     "projekt_aendern",
     KATEGORIE_AENDERN,
     pflicht={"gid"},
-    optional={"name", "beschreibung", "faellig", "besitzer_gid", "farbe"},
+    optional={
+        "name",
+        "beschreibung",
+        "notizen",
+        "faellig",
+        "besitzer_gid",
+        "farbe",
+        "sichtbarkeit",
+        "standardansicht",
+    },
     gid_typ="projekt",
     leerbar=LEERBAR,
 )
@@ -757,8 +794,14 @@ class ProjektAendern:
         daten: dict = {}
         if "name" in op:
             daten["name"] = op["name"]
-        if "beschreibung" in op:
-            daten["notes"] = op["beschreibung"]
+        if "beschreibung" in op and "notizen" in op:
+            raise ToolFehler("„beschreibung“ und „notizen“ meinen dasselbe; bitte nur eines.")
+        if "beschreibung" in op or "notizen" in op:
+            daten["notes"] = op.get("beschreibung") or op["notizen"]
+        if "sichtbarkeit" in op:
+            daten["privacy_setting"] = SICHTBARKEIT[op["sichtbarkeit"]]
+        if "standardansicht" in op:
+            daten["default_view"] = op["standardansicht"]
         if "faellig" in op:
             daten["due_on"] = op["faellig"]
         if "besitzer_gid" in op:
@@ -936,12 +979,15 @@ _AUFGABEN_FELDER_OP = {
     "tags",
     "follower",
     "felder",
+    "genehmigung",
 }
 
 
 def _aufgaben_art(op: dict) -> str:
     if op.get("meilenstein"):
         return "Meilenstein"
+    if op.get("genehmigung"):
+        return "Genehmigung"
     return "Unteraufgabe" if "uebergeordnet" in op else "Aufgabe"
 
 
@@ -1064,7 +1110,11 @@ class AufgabeAendern:
             elif feld == "notes":
                 teile.append("Beschreibung geändert")
             elif feld == "resource_subtype":
-                teile.append("wird Meilenstein" if neu == "milestone" else "wird normale Aufgabe")
+                teile.append(
+                    {"milestone": "wird Meilenstein", "approval": "wird Genehmigung"}.get(
+                        neu, "wird normale Aufgabe"
+                    )
+                )
             elif feld == "assignee":
                 alt = (aufgabe.get("assignee") or {}).get("name") or LEER
                 teile.append(f"Zuständig {alt} → {await _nutzer_name(lauf, neu) if neu else LEER}")

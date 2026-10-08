@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     asana_delete_enabled: bool = True
     asana_delete_roles: RollenListe = frozenset({"admin"})
     asana_attachment_view_max_mb: float = 5
+    asana_team_verwaltung_roles: RollenListe = frozenset({"admin"})
 
     # Foto-Eingang
     photo_max_mb: float = 5
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
             return frozenset(int(teil) for teil in wert.split(",") if teil.strip())
         return wert
 
-    @field_validator("asana_delete_roles", mode="before")
+    @field_validator("asana_delete_roles", "asana_team_verwaltung_roles", mode="before")
     @classmethod
     def _rollen_aus_kommaliste(cls, wert: object) -> object:
         if isinstance(wert, str):
