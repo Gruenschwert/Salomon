@@ -200,7 +200,7 @@ async def test_fehler_bei_der_foto_verarbeitung_ergibt_neutrale_meldung(
 
 
 async def test_foto_geht_als_base64_an_claude_aber_nie_in_die_datenbank(
-    baue_kanal, baue_agent, session_fabrik, gesendet
+    baue_kanal, baue_agent, session_fabrik, gesendet, user
 ):
     client = FakeAnthropic(claude_antwort(text_block("Erkannt: 3 Aufgaben")))
     kanal = baue_kanal(handler=baue_agent(client).beantworte)
@@ -225,7 +225,7 @@ async def test_foto_geht_als_base64_an_claude_aber_nie_in_die_datenbank(
     # Schon beim zweiten Aufruf steht vom ersten Foto nur noch der Platzhalter im Verlauf.
     assert zweiter[0] == {"role": "user", "content": "[Foto] Bitte anlegen"}
 
-    assert [m["content"] for m in await lade_verlauf(session_fabrik, CHAT_ID, 20)] == [
+    assert [m["content"] for m in await lade_verlauf(session_fabrik, user, CHAT_ID, 20)] == [
         "[Foto] Bitte anlegen",
         "Erkannt: 3 Aufgaben",
         "[Foto]",

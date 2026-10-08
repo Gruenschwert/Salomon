@@ -14,6 +14,7 @@ from app.db.models import (
     AsanaOperation,
     jetzt,
 )
+from app.db.session import db_sitzung
 from app.observability.audit import protokolliere
 
 # Die Module mit weiteren Operationen tragen sich beim Import in OP_TYPEN ein.
@@ -468,7 +469,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
 
     async def _reserviere(self, approval_id: int, ops: list[dict]) -> bool:
         """Legt die Operationen der Freigabe an. False: Der Satz lief schon einmal an."""
-        async with self.kontext.session_fabrik() as session:
+        async with db_sitzung(self.kontext.session_fabrik, aktueller_nutzer.get()) as session:
             vorhanden = await session.scalar(
                 select(func.count())
                 .select_from(AsanaOperation)
@@ -487,7 +488,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
         return True
 
     async def _setze(self, approval_id: int, position: int, **werte) -> None:
-        async with self.kontext.session_fabrik() as session:
+        async with db_sitzung(self.kontext.session_fabrik, aktueller_nutzer.get()) as session:
             await session.execute(
                 update(AsanaOperation)
                 .where(
@@ -500,7 +501,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
 
     async def _schliesse_ab(self, approval_id: int) -> None:
         """Alles, was nach einem Abbruch noch offen ist, gilt als nicht ausgeführt."""
-        async with self.kontext.session_fabrik() as session:
+        async with db_sitzung(self.kontext.session_fabrik, aktueller_nutzer.get()) as session:
             await session.execute(
                 update(AsanaOperation)
                 .where(

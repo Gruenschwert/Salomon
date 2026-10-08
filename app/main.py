@@ -35,7 +35,8 @@ def erstelle_anthropic_client(settings: Settings) -> anthropic.AsyncAnthropic:
 def main() -> None:
     settings = get_settings()
     richte_logging_ein(settings)
-    engine = erstelle_engine(settings.database_url.get_secret_value())
+    laufzeit_url = settings.app_database_url.get_secret_value().strip()
+    engine = erstelle_engine(laufzeit_url or settings.database_url.get_secret_value())
     session_fabrik = erstelle_session_fabrik(engine)
 
     client = erstelle_anthropic_client(settings)

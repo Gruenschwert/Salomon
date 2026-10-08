@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 
+from app.auth.kontext import NutzerKontext
 from app.auth.users import finde_erlaubten_nutzer
 from app.channels.base import FreigabeAnfrage
 from app.db.models import (
@@ -14,9 +15,9 @@ from app.db.models import (
     STATUS_GENEHMIGT,
     STATUS_OFFEN,
     Approval,
-    User,
     jetzt,
 )
+from app.db.session import db_sitzung
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
 from app.tools.base import (
     Tool,
@@ -30,7 +31,10 @@ from app.tools.registry import Registry, fuehre_tool_aus
 FREIGABE_GUELTIGKEIT = timedelta(minutes=15)
 
 STATUS_NICHT_GEFUNDEN = "nicht_gefunden"
-STATUS_FREMDER_NUTZER = "fremder_nutzer"
+NICHT_DEINE_FREIGABE_TEXT = (
+    "Diese Freigabe gibt es nicht (mehr) oder sie gehört jemand anderem. Bestätigen kann nur, "
+    "wer den Änderungssatz angestoßen hat."
+)
 STATUS_BEREITS_ENTSCHIEDEN = "bereits_entschieden"
 
 MAX_KURZTEXT_ZEICHEN = 200
@@ -51,8 +55,9 @@ class Entscheidung:
 
     @property
     def abgeschlossen(self) -> bool:
-        """False, solange die Freigabe für den eigentlichen Nutzer noch offen ist."""
-        return self.status != STATUS_FREMDER_NUTZER
+        """False, wenn der Klick nichts entschieden hat: Die Buttons bleiben dann stehen, weil
+        die Freigabe für die Person, der sie gehört, noch offen sein kann."""
+        return self.status != STATUS_NICHT_GEFUNDEN
 
 
 class Freigaben:
@@ -61,14 +66,14 @@ class Freigaben:
         self._session_fabrik = kontext.session_fabrik
         self._registry = registry
 
-    async def anfragen(self, user: User, tool: Tool, params: dict) -> FreigabeAnfrage:
+    async def anfragen(self, user: NutzerKontext, tool: Tool, params: dict) -> FreigabeAnfrage:
         """Legt eine offene Freigabe an. Das Tool wird dabei NICHT ausgeführt."""
         marke = aktueller_nutzer.set(user)
         try:
             vorschau = await tool.bereite_vor(**params)
         finally:
             aktueller_nutzer.reset(marke)
-        async with self._session_fabrik() as session:
+        async with db_sitzung(self._session_fabrik, user) as session:
             approval = Approval(
                 user_id=user.id, tool_name=tool.name, parameter=params, vorschau_text=vorschau
             )
@@ -86,15 +91,15 @@ class Freigaben:
             approval_id=approval.id, vorschau_text=vorschau, anzahl=anzahl, kompakt_text=kompakt
         )
 
-    async def verwerfen(self, approval_id: int, grund: str) -> int | None:
-        """Verwirft eine Freigabe, die den Nutzer nicht erreicht hat. Liefert dessen User-ID.
+    async def verwerfen(self, approval_id: int, grund: str, nutzer: NutzerKontext) -> bool:
+        """Verwirft eine eigene Freigabe, die die Person nicht erreicht hat.
 
         Ohne sichtbare Buttons darf nichts offen bleiben, was später ausgeführt werden könnte.
         """
-        async with self._session_fabrik() as session:
+        async with db_sitzung(self._session_fabrik, nutzer) as session:
             approval = await session.get(Approval, approval_id)
             if approval is None:
-                return None
+                return False
             await session.execute(
                 update(Approval)
                 .where(
@@ -112,19 +117,19 @@ class Freigaben:
             ergebnis_kurz=f"Freigabe #{approval_id} verworfen",
             fehler=f"nicht zustellbar: {grund}",
         )
-        return approval.user_id
+        return True
 
-    async def stand(self, user_id: int, zeitpunkt: datetime | None = None) -> str:
+    async def stand(self, nutzer: NutzerKontext, zeitpunkt: datetime | None = None) -> str:
         """Kurzer Stand der letzten Freigaben eines Nutzers für den System-Prompt.
 
         So weiß Claude bei „mach das“, ob etwas offen, verworfen, abgelaufen oder erledigt ist.
         """
         zeitpunkt = zeitpunkt or jetzt()
-        async with self._session_fabrik() as session:
+        async with db_sitzung(self._session_fabrik, nutzer) as session:
             letzte = list(
                 await session.scalars(
                     select(Approval)
-                    .where(Approval.user_id == user_id)
+                    .where(Approval.user_id == nutzer.nutzer_id)
                     .order_by(Approval.id.desc())
                     .limit(STAND_ANZAHL)
                 )
@@ -174,15 +179,12 @@ class Freigaben:
             )
             return None
 
-        async with self._session_fabrik() as session:
+        # Die Sitzung sieht nur Freigaben dieser Person. Eine fremde Freigabe ist für sie
+        # deshalb gar nicht vorhanden; die zweite Prüfung ist nur ein zusätzliches Netz.
+        async with db_sitzung(self._session_fabrik, user) as session:
             approval = await session.get(Approval, approval_id)
-            if approval is None:
-                return Entscheidung(STATUS_NICHT_GEFUNDEN, "Diese Freigabe gibt es nicht (mehr).")
-            if approval.user_id != user.id:
-                return Entscheidung(
-                    STATUS_FREMDER_NUTZER,
-                    "Nur der anfragende Nutzer kann diese Freigabe entscheiden.",
-                )
+            if approval is None or approval.user_id != user.id:
+                return Entscheidung(STATUS_NICHT_GEFUNDEN, NICHT_DEINE_FREIGABE_TEXT)
             tool = self._registry.hole(approval.tool_name)
             frage = None
             # Ablehnen und Ablaufen gehen in beiden Stufen, Zustimmen nur in der passenden.
@@ -241,7 +243,9 @@ class Freigaben:
             STATUS_ABGELEHNT, f"❌ Verworfen: {_kurztext(approval.vorschau_text)}", **verlauf
         )
 
-    async def _ausfuehren(self, approval: Approval, user: User, zweifach: bool) -> Entscheidung:
+    async def _ausfuehren(
+        self, approval: Approval, user: NutzerKontext, zweifach: bool
+    ) -> Entscheidung:
         tool = self._registry.hole(approval.tool_name)
         if tool is None or user.rolle not in tool.erlaubte_rollen:
             await protokolliere(
@@ -271,10 +275,10 @@ class Freigaben:
             STATUS_GENEHMIGT, text, im_verlauf=tool.ergebnis_im_verlauf, user_id=user.id
         )
 
-    async def anzahl_offen(self, zeitpunkt: datetime | None = None) -> int:
-        """Noch nicht abgelaufene Freigaben, die auf einen Klick warten."""
+    async def anzahl_offen(self, nutzer: NutzerKontext, zeitpunkt: datetime | None = None) -> int:
+        """Eigene, noch nicht abgelaufene Freigaben, die auf einen Klick warten."""
         grenze = (zeitpunkt or jetzt()) - FREIGABE_GUELTIGKEIT
-        async with self._session_fabrik() as session:
+        async with db_sitzung(self._session_fabrik, nutzer) as session:
             return await session.scalar(
                 select(func.count())
                 .select_from(Approval)

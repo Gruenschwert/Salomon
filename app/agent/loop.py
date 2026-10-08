@@ -10,9 +10,9 @@ import anthropic
 from app.agent.history import lade_verlauf, speichere_austausch
 from app.agent.prompts import baue_system_prompt
 from app.auth.approvals import Freigaben
+from app.auth.kontext import NutzerKontext
 from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
 from app.config import Settings
-from app.db.models import User
 from app.db.session import SessionFabrik
 from app.medien import groesse_text
 from app.observability.audit import protokolliere
@@ -81,19 +81,17 @@ class Agent:
         self._kosten = kosten
         self._kontext = ToolKontext(settings=settings, session_fabrik=session_fabrik)
 
-    async def beantworte(self, nachricht: EingehendeNachricht, user: User) -> Antwort:
+    async def beantworte(self, nachricht: EingehendeNachricht, user: NutzerKontext) -> Antwort:
         if await self._kosten.limit_erreicht():
             return Antwort(text=TAGESLIMIT_TEXT)
         verlauf = await lade_verlauf(
-            self._session_fabrik, nachricht.chat_id, self._settings.history_max_messages
+            self._session_fabrik, user, nachricht.chat_id, self._settings.history_max_messages
         )
         messages = [*verlauf, {"role": "user", "content": _inhalt(nachricht)}]
         # Freigaben, die in dieser Runde angelegt wurden; der Kanal zeigt sie mit Buttons an.
         anfragen: list[FreigabeAnfrage] = []
         try:
-            text = await self._schleife(
-                messages, user, anfragen, await self._freigaben.stand(user.id)
-            )
+            text = await self._schleife(messages, user, anfragen, await self._freigaben.stand(user))
         except anthropic.APIError:
             log.exception("Claude-Aufruf fehlgeschlagen")
             return Antwort(text=DIENST_FEHLER_TEXT, freigaben=tuple(anfragen))
@@ -105,7 +103,7 @@ class Agent:
     async def _schleife(
         self,
         messages: list[dict],
-        user: User,
+        user: NutzerKontext,
         anfragen: list[FreigabeAnfrage],
         freigaben_stand: str = "",
     ) -> str:
@@ -203,7 +201,7 @@ class Agent:
         )
 
     async def _bearbeite_tool_anfrage(
-        self, name: str, params: dict, user: User, anfragen: list[FreigabeAnfrage]
+        self, name: str, params: dict, user: NutzerKontext, anfragen: list[FreigabeAnfrage]
     ) -> ToolErgebnis:
         tool = self._registry.hole(name)
         if tool is None or user.rolle not in tool.erlaubte_rollen:

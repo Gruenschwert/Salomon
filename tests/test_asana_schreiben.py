@@ -618,7 +618,7 @@ async def test_ergebnis_landet_nach_dem_klick_im_verlauf(
     assert nachricht.rolle == "assistant"
     assert nachricht.inhalt.startswith("[Ergebnis der Freigabe]\n✅ Asana-Änderungssatz")
     # Ohne vorherige Nutzer-Nachricht bleibt der Verlauf für die API trotzdem gültig.
-    assert await lade_verlauf(session_fabrik, 5, 20) == []
+    assert await lade_verlauf(session_fabrik, user, 5, 20) == []
 
 
 # ---------------------------------------------------------------- Ergänzungen

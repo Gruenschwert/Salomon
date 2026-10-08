@@ -3,6 +3,7 @@
 import re
 
 from app.db.models import TelegramDatei
+from app.db.session import db_sitzung
 from app.medien import groesse_text
 from app.tools.asana_operationen import (
     KATEGORIE_ANLEGEN,
@@ -62,7 +63,7 @@ async def _datei(op: dict, lauf: Lauf) -> TelegramDatei:
     treffer = DATEI_MUSTER.match(op["datei"])
     datei = None
     if treffer:
-        async with lauf.kontext.session_fabrik() as session:
+        async with db_sitzung(lauf.kontext.session_fabrik, aktueller_nutzer.get()) as session:
             datei = await session.get(TelegramDatei, int(treffer.group(1)))
     if datei is None or datei.user_id != aktueller_nutzer.get().id:
         raise ToolFehler(

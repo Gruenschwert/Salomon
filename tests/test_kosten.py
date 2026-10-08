@@ -99,7 +99,8 @@ async def test_status_fuer_admin(kanal, kosten, user, freigaben, registry):
     assert "gs-assistant 0.1.0" in text
     assert "Uptime: 0 T 0 h 0 min" in text
     assert "Kosten heute: 0,50 € von 5,00 €" in text
-    assert "Offene Freigaben: 1" in text
+    # Gezählt werden nur die eigenen Freigaben; die des Mitarbeiters sieht der Admin nicht.
+    assert "Eigene offene Freigaben: 0" in text
 
 
 async def test_status_nur_fuer_admins(kanal):

@@ -3,8 +3,10 @@
 import re
 from typing import Any
 
-from app.db.models import AuditLog
-from app.db.session import SessionFabrik
+from sqlalchemy import insert
+
+from app.db.models import AuditLog, jetzt
+from app.db.session import SessionFabrik, db_sitzung
 
 EREIGNIS_UNBEKANNT = "unbekannt"
 
@@ -37,9 +39,16 @@ async def protokolliere(
     dauer_ms: int = 0,
     fehler: str | None = None,
 ) -> None:
-    async with session_fabrik() as session:
-        session.add(
-            AuditLog(
+    # Einträge ohne Person (unbekannte Telegram-Nutzer) lassen sich nur schreiben, nie lesen.
+    sitzung = db_sitzung(session_fabrik, user_id) if user_id is not None else session_fabrik()
+    async with sitzung as session:
+        # Bewusst ohne RETURNING: Einen Eintrag ohne Person darf die Laufzeitrolle schreiben,
+        # aber nicht lesen, und RETURNING zählt für die Datenbank als Lesen.
+        await session.execute(
+            insert(AuditLog)
+            .inline()
+            .values(
+                zeit=jetzt(),
                 user_id=user_id,
                 tool_name=tool_name,
                 parameter=bereinige(parameter),

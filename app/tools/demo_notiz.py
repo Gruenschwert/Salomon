@@ -1,6 +1,7 @@
 """Schreib-Tool nur zum Testen des Freigabe-Flows."""
 
 from app.db.models import Notiz
+from app.db.session import db_sitzung
 from app.tools.base import BasisTool, ToolFehler, aktueller_nutzer
 
 MAX_NOTIZ_ZEICHEN = 1000
@@ -24,8 +25,9 @@ class DemoNotiz(BasisTool):
 
     async def ausfuehren(self, text: str) -> dict:
         text = _pruefe(text)
-        async with self.kontext.session_fabrik() as session:
-            notiz = Notiz(user_id=aktueller_nutzer.get().id, text=text)
+        nutzer = aktueller_nutzer.get()
+        async with db_sitzung(self.kontext.session_fabrik, nutzer) as session:
+            notiz = Notiz(user_id=nutzer.id, text=text)
             session.add(notiz)
             await session.commit()
         return {"gespeichert": True, "notiz_id": notiz.id}

@@ -32,7 +32,7 @@ from app.channels.base import (
 )
 from app.config import Settings
 from app.db.models import TelegramDatei
-from app.db.session import SessionFabrik
+from app.db.session import SessionFabrik, db_sitzung
 from app.medien import bild_medientyp as medientyp
 from app.observability.alerts import Alarme
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
@@ -141,7 +141,7 @@ class TelegramKanal:
         self, user_id: int, chat_id: int, file_id: str, name: str, typ: str, groesse: int | None
     ) -> DateiHinweis:
         """Hält fest, wo die Datei bei Telegram liegt. Der Inhalt wird nicht gespeichert."""
-        async with self._session_fabrik() as session:
+        async with db_sitzung(self._session_fabrik, user_id) as session:
             eintrag = TelegramDatei(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -244,7 +244,7 @@ class TelegramKanal:
                 f"gs-assistant {__version__}",
                 f"Uptime: {_als_dauer(time.monotonic() - self._gestartet)}",
                 f"Kosten heute: {als_euro(await self._kosten.heute_eur())} von {als_euro(limit)}",
-                f"Offene Freigaben: {await self._freigaben.anzahl_offen()}",
+                f"Eigene offene Freigaben: {await self._freigaben.anzahl_offen(user)}",
             ]
         )
 
@@ -279,17 +279,19 @@ class TelegramKanal:
             await self.sende_antwort(nachricht.chat_id, FEHLER_TEXT)
             await self._melde_fehler("Nachricht", exc)
             return
-        await self._sende(nachricht.chat_id, antwort)
+        await self._sende(nachricht.chat_id, antwort, nachricht.absender_id)
 
-    async def _sende(self, chat_id: int, antwort: Antwort | None) -> None:
+    async def _sende(self, chat_id: int, antwort: Antwort | None, absender_id: int) -> None:
         if antwort is not None:
             # Nachrichten gehen als reiner Text raus; Markdown-Zeichen von Claude würden
             # sonst wörtlich erscheinen. Vorschauen bleiben unangetastet.
             await self.sende_antwort(chat_id, ohne_markdown(antwort.text))
             for anfrage in antwort.freigaben:
-                await self._sende_freigabe_oder_verwirf(chat_id, anfrage)
+                await self._sende_freigabe_oder_verwirf(chat_id, anfrage, absender_id)
 
-    async def _sende_freigabe_oder_verwirf(self, chat_id: int, anfrage: FreigabeAnfrage) -> None:
+    async def _sende_freigabe_oder_verwirf(
+        self, chat_id: int, anfrage: FreigabeAnfrage, absender_id: int
+    ) -> None:
         """Kommt die Freigabe nicht beim Nutzer an, wird sie sofort verworfen und er erfährt es.
 
         Ohne sichtbare Buttons darf kein Änderungssatz offen bleiben.
@@ -305,10 +307,11 @@ class TelegramKanal:
                 anfrage.anzahl,
                 len(anfrage.vorschau_text),
             )
-        user_id = await self._freigaben.verwerfen(anfrage.approval_id, grund)
+        nutzer = await finde_erlaubten_nutzer(self._session_fabrik, absender_id)
         text = f"Die Freigabe konnte nicht gesendet werden: {grund}. Es wurde nichts geändert."
-        if user_id is not None:
-            await speichere_hinweis(self._session_fabrik, chat_id, user_id, text)
+        if nutzer is not None:
+            await self._freigaben.verwerfen(anfrage.approval_id, grund, nutzer)
+            await speichere_hinweis(self._session_fabrik, chat_id, nutzer.id, text)
         await self.sende_antwort(chat_id, text)
         await self._alarme.melde(
             f"⚠️ Freigabe #{anfrage.approval_id} war nicht zustellbar und wurde verworfen."
@@ -462,7 +465,7 @@ class TelegramKanal:
             return
         for hinweis in hinweise:
             await self.sende_antwort(chat_id, hinweis)
-        await self._sende(chat_id, antwort)
+        await self._sende(chat_id, antwort, absender_id)
 
     async def _bei_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or update.effective_chat is None:
@@ -510,7 +513,13 @@ class TelegramKanal:
                     # Ohne sichtbare Rückfrage darf die Freigabe nicht offen bleiben.
                     grund = maskiere(f"{type(exc).__name__}: {exc}", self._geheimnisse)
                     log.exception("Lösch-Rückfrage #%s konnte nicht gesendet werden", approval_id)
-                    await self._freigaben.verwerfen(int(approval_id), grund[:MAX_GRUND_ZEICHEN])
+                    nutzer = await finde_erlaubten_nutzer(
+                        self._session_fabrik, update.effective_user.id
+                    )
+                    if nutzer is not None:
+                        await self._freigaben.verwerfen(
+                            int(approval_id), grund[:MAX_GRUND_ZEICHEN], nutzer
+                        )
                     await self.sende_antwort(
                         update.effective_chat.id,
                         "Die Rückfrage zum Löschen konnte nicht gesendet werden: "

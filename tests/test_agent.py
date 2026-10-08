@@ -44,7 +44,7 @@ async def test_antwort_und_verlauf(settings, session_fabrik, baue_agent, user):
     assert aufruf["system"].startswith(SYSTEM_PROMPT + ASANA_REGELN)
     assert f"Heute ist {_HEUTE}" in aufruf["system"]
     assert aufruf["messages"] == [{"role": "user", "content": "Hi"}]
-    assert await lade_verlauf(session_fabrik, CHAT_ID, 20) == [
+    assert await lade_verlauf(session_fabrik, user, CHAT_ID, 20) == [
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hallo!"},
     ]
@@ -63,7 +63,7 @@ async def test_verlauf_ist_begrenzt_und_beginnt_mit_nutzer(session_fabrik, baue_
     agent = baue_agent(client)
     for i in range(5):
         await agent.beantworte(nachricht(f"F{i}"), user)
-    verlauf = await lade_verlauf(session_fabrik, CHAT_ID, 3)
+    verlauf = await lade_verlauf(session_fabrik, user, CHAT_ID, 3)
     assert [m["content"] for m in verlauf] == ["F4", "A"]
 
 
@@ -72,7 +72,7 @@ async def test_api_fehler_fuehrt_zu_hoeflicher_meldung(settings, session_fabrik,
     agent = baue_agent(FakeAnthropic(fehler))
     antwort = await agent.beantworte(nachricht("Hi"), user)
     assert antwort.text == DIENST_FEHLER_TEXT
-    assert await lade_verlauf(session_fabrik, CHAT_ID, 20) == []
+    assert await lade_verlauf(session_fabrik, user, CHAT_ID, 20) == []
 
 
 async def test_lesendes_tool_wird_ausgefuehrt(settings, session_fabrik, baue_agent, user):
@@ -92,7 +92,7 @@ async def test_lesendes_tool_wird_ausgefuehrt(settings, session_fabrik, baue_age
     assert ergebnis["is_error"] is False
     assert [e.tool_name for e in await _audit(session_fabrik)] == ["beispiel_lesen"]
     # Im Verlauf landet nur der Text, keine Tool-Blöcke.
-    assert [m["content"] for m in await lade_verlauf(session_fabrik, CHAT_ID, 20)] == [
+    assert [m["content"] for m in await lade_verlauf(session_fabrik, user, CHAT_ID, 20)] == [
         "Bitte lesen",
         "Fertig",
     ]
@@ -160,7 +160,7 @@ async def test_schleife_bricht_am_rundenlimit_mit_zwischenstand_ab(
         caplog.text
     )
     # Die Meldung steht im Verlauf, damit „weiter“ funktioniert.
-    verlauf = await lade_verlauf(session_fabrik, CHAT_ID, 20)
+    verlauf = await lade_verlauf(session_fabrik, user, CHAT_ID, 20)
     assert verlauf[-1]["content"].startswith("Ich habe nach 25 Runden aufgehört")
 
 

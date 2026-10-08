@@ -220,7 +220,9 @@ async def test_freigabe_mit_57_operationen_kommt_kompakt_mit_datei_und_buttons(a
         "… und 47 weitere. Die vollständige Liste steht in der Datei."
     )
 
-    await akanal._sende(CHAT_ID, Antwort(text="Ich hake 57 Aufgaben ab.", freigaben=(anfrage,)))
+    await akanal._sende(
+        CHAT_ID, Antwort(text="Ich hake 57 Aufgaben ab.", freigaben=(anfrage,)), ERLAUBT_ID
+    )
 
     texte = [text for text, _ in akanal.gesendet]
     assert texte[0] == "Ich hake 57 Aufgaben ab."
@@ -284,7 +286,7 @@ async def test_sendefehler_verwirft_den_satz_und_sagt_es_dem_nutzer(
 
     with caplog.at_level(logging.ERROR):
         await akanal._sende(
-            CHAT_ID, Antwort(text="Änderungssatz vorbereitet.", freigaben=(anfrage,))
+            CHAT_ID, Antwort(text="Änderungssatz vorbereitet.", freigaben=(anfrage,)), ERLAUBT_ID
         )
 
     assert akanal.gesendet[-1][0] == (
@@ -321,7 +323,7 @@ async def test_grund_des_sendefehlers_enthaelt_keine_secrets(asana, akanal, user
         raise RuntimeError(f"Verbindung mit Bearer {ASANA_TOKEN} abgelehnt")
 
     monkeypatch.setattr(akanal, "sende_freigabe_anfrage", kaputt)
-    await akanal._sende(CHAT_ID, Antwort(text="x", freigaben=(anfrage,)))
+    await akanal._sende(CHAT_ID, Antwort(text="x", freigaben=(anfrage,)), ERLAUBT_ID)
     assert "RuntimeError: Verbindung mit Bearer *** abgelehnt" in akanal.gesendet[-1][0]
     assert ASANA_TOKEN not in akanal.gesendet[-1][0]
 
@@ -604,14 +606,14 @@ async def test_stand_der_freigaben_steht_fuer_claude_im_systemprompt(
     tool = registry.hole("beispiel_schreiben")
     offen = await freigaben.anfragen(user, tool, {"text": "erste"})
     verworfen = await freigaben.anfragen(user, tool, {"text": "zweite"})
-    await freigaben.verwerfen(verworfen.approval_id, "BadRequest")
+    await freigaben.verwerfen(verworfen.approval_id, "BadRequest", user)
 
-    stand = await freigaben.stand(user.id)
+    stand = await freigaben.stand(user)
     assert f"#{verworfen.approval_id} vor 0 min: Schreiben: zweite – verworfen" in stand
     assert f"#{offen.approval_id} vor 0 min: Schreiben: erste – wartet auf ✅ oder ❌" in stand
-    spaeter = await freigaben.stand(user.id, zeitpunkt=jetzt() + timedelta(minutes=20))
+    spaeter = await freigaben.stand(user, zeitpunkt=jetzt() + timedelta(minutes=20))
     assert "abgelaufen, nichts wurde ausgeführt" in spaeter
-    assert await freigaben.stand(user.id, zeitpunkt=jetzt() + timedelta(hours=3)) == ""
+    assert await freigaben.stand(user, zeitpunkt=jetzt() + timedelta(hours=3)) == ""
 
     client = FakeAnthropic(claude_antwort(text_block("Die Buttons warten noch auf dich.")))
     antwort = await baue_agent(client).beantworte(nachricht("mach das"), user)
@@ -619,7 +621,7 @@ async def test_stand_der_freigaben_steht_fuer_claude_im_systemprompt(
     assert "Stand der letzten Freigaben dieses Nutzers" in system
     assert "wartet auf ✅ oder ❌ des Nutzers" in system and "verworfen" in system
     assert antwort.text == "Die Buttons warten noch auf dich."
-    assert (await lade_verlauf(session_fabrik, CHAT_ID, 5))[-1]["content"] == antwort.text
+    assert (await lade_verlauf(session_fabrik, user, CHAT_ID, 5))[-1]["content"] == antwort.text
 
 
 def test_heutiges_datum_steht_weiter_im_prompt():

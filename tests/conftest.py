@@ -16,7 +16,7 @@ from app.auth.approvals import Freigaben
 from app.auth.users import finde_erlaubten_nutzer, uebernehme_bestand
 from app.config import Settings
 from app.db.models import Base
-from app.db.session import erstelle_session_fabrik
+from app.db.session import erstelle_engine, erstelle_session_fabrik
 from app.observability.alerts import Alarme
 from app.observability.costs import Kosten
 from app.tools.base import ToolKontext
@@ -76,12 +76,41 @@ def pg_url(pg_server) -> str:
 
 @pytest.fixture
 async def engine(pg_url):
+    """Verbindung als Eigentümer der Tabellen: räumt auf und dient den Tests zum Nachsehen."""
     engine = create_async_engine(pg_url, poolclass=NullPool)
     tabellen = ", ".join(sorted(set(Base.metadata.tables) - _STAMMDATEN))
     async with engine.begin() as verbindung:
         await verbindung.execute(text(f"TRUNCATE {tabellen} RESTART IDENTITY CASCADE"))
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture
+async def laufzeit_engine(pg_url, engine):
+    """Verbindung so, wie der Bot sie im Betrieb hat: als Rolle app_laufzeit."""
+    laufzeit = erstelle_engine(pg_url, poolclass=NullPool)
+    yield laufzeit
+    await laufzeit.dispose()
+
+
+class TestFabrik:
+    """Session-Fabrik für Tests.
+
+    Sitzungen mit Nutzerkontext (über `db_sitzung`) laufen wie im Betrieb als app_laufzeit und
+    unterliegen der Row Level Security. Sitzungen ohne Kontext laufen als Eigentümer, damit die
+    Tests nachsehen können, was wirklich in den Tabellen steht. Im Betrieb gibt es diesen
+    zweiten Weg nicht: Dort ist jede Verbindung app_laufzeit.
+    """
+
+    __test__ = False
+
+    def __init__(self, eigentuemer, laufzeit) -> None:
+        self.eigentuemer = erstelle_session_fabrik(eigentuemer)
+        self.laufzeit = erstelle_session_fabrik(laufzeit)
+
+    def __call__(self, **optionen):
+        mit_kontext = "nutzer_id" in (optionen.get("info") or {})
+        return (self.laufzeit if mit_kontext else self.eigentuemer)(**optionen)
 
 
 @pytest.fixture
@@ -102,8 +131,14 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def session_fabrik(engine):
-    return erstelle_session_fabrik(engine)
+def session_fabrik(engine, laufzeit_engine):
+    return TestFabrik(engine, laufzeit_engine)
+
+
+@pytest.fixture
+def laufzeit_fabrik(laufzeit_engine):
+    """Reine Laufzeit-Fabrik: genau das, was der Bot im Betrieb benutzt."""
+    return erstelle_session_fabrik(laufzeit_engine)
 
 
 @pytest.fixture

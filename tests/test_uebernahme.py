@@ -35,12 +35,8 @@ async def test_erste_uebernahme_legt_admin_und_mitarbeiter_an(settings, session_
     assert await _rollen(session_fabrik) == {ADMIN_ID: {"admin"}, ERLAUBT_ID: {"mitarbeiter"}}
     admin = await finde_erlaubten_nutzer(session_fabrik, ADMIN_ID, "Theis")
     assert admin.anzeigename == "Theis"
-    assert (admin.zeitzone, admin.ton, admin.aktiv, admin.gesperrt_am) == (
-        "Europe/Berlin",
-        "du",
-        True,
-        None,
-    )
+    assert (admin.zeitzone, admin.ton, admin.rollen) == ("Europe/Berlin", "du", {"admin"})
+    assert admin.ist_admin and admin.telegram_id == ADMIN_ID
     assert [a.telegram_id for a in await aktive_admins(session_fabrik)] == [ADMIN_ID]
 
 

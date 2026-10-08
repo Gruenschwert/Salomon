@@ -7,8 +7,8 @@ from typing import ClassVar, Protocol
 
 import httpx
 
+from app.auth.kontext import NutzerKontext
 from app.config import Settings
-from app.db.models import User
 from app.db.session import SessionFabrik
 
 
@@ -86,7 +86,7 @@ class ToolKontext:
 
 # Der Nutzer, in dessen Auftrag das Tool gerade läuft. Wird vom Ausführer gesetzt, damit
 # `ausfuehren(**params)` ausschließlich die Parameter aus dem Schema entgegennimmt.
-aktueller_nutzer: ContextVar[User] = ContextVar("aktueller_nutzer")
+aktueller_nutzer: ContextVar[NutzerKontext] = ContextVar("aktueller_nutzer")
 # Die Freigabe, in deren Auftrag ein schreibendes Tool gerade läuft (None außerhalb davon).
 aktuelle_freigabe: ContextVar[int | None] = ContextVar("aktuelle_freigabe", default=None)
 # True, wenn der Nutzer für diese Freigabe auch die zweite Rückfrage bestätigt hat.

@@ -401,7 +401,7 @@ async def test_vom_dokument_im_chat_bis_zum_upload_in_asana(
     (upload,) = [a for a in fake.anfragen if a.method == "POST"]
     assert PDF in upload.content
     # Im Verlauf und im Audit-Log steht der Verweis, nie der Inhalt.
-    verlauf = await lade_verlauf(session_fabrik, CHAT_ID, 20)
+    verlauf = await lade_verlauf(session_fabrik, user, CHAT_ID, 20)
     assert "datei:1" in verlauf[0]["content"]
     async with session_fabrik() as session:
         gespeichert = [str(m.inhalt) for m in await session.scalars(select(Message))]

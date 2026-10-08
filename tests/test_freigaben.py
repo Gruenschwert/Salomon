@@ -5,7 +5,6 @@ from sqlalchemy import select
 from app.agent.loop import WARTET_AUF_FREIGABE_TEXT
 from app.auth.approvals import (
     STATUS_BEREITS_ENTSCHIEDEN,
-    STATUS_FREMDER_NUTZER,
     STATUS_NICHT_GEFUNDEN,
     Freigaben,
 )
@@ -75,7 +74,8 @@ async def test_ablehnung_verwirft(freigaben, registry, user, session_fabrik):
 async def test_anderer_nutzer_kann_nicht_freigeben(freigaben, registry, user, session_fabrik):
     anfrage = await _anfrage(freigaben, registry, user)
     entscheidung = await freigaben.entscheiden(anfrage.approval_id, ADMIN_ID, genehmigt=True)
-    assert entscheidung.status == STATUS_FREMDER_NUTZER
+    assert entscheidung.status == STATUS_NICHT_GEFUNDEN
+    assert "gehört jemand anderem" in entscheidung.text
     assert not entscheidung.abgeschlossen
     assert BeispielSchreiben.ausgefuehrt == []
     assert (await _approval(session_fabrik, anfrage.approval_id)).status == "offen"
@@ -123,8 +123,8 @@ async def test_unbekannte_freigabe(freigaben, user):
 
 async def test_anzahl_offen_ignoriert_abgelaufene(freigaben, registry, user):
     await _anfrage(freigaben, registry, user)
-    assert await freigaben.anzahl_offen() == 1
-    assert await freigaben.anzahl_offen(zeitpunkt=jetzt() + timedelta(minutes=16)) == 0
+    assert await freigaben.anzahl_offen(user) == 1
+    assert await freigaben.anzahl_offen(user, zeitpunkt=jetzt() + timedelta(minutes=16)) == 0
 
 
 async def test_demo_notiz_speichert_erst_nach_freigabe(kontext, user, session_fabrik):

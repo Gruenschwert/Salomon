@@ -38,6 +38,9 @@ class Settings(BaseSettings):
 
     # Datenbank
     database_url: SecretStr
+    # Optional: eigener Datenbank-Login der Rolle app_laufzeit für den laufenden Bot. Leer:
+    # Der Bot verbindet sich mit DATABASE_URL und wechselt beim Verbinden in app_laufzeit.
+    app_database_url: SecretStr = SecretStr("")
 
     # Shopify
     shopify_canasups_domain: str = ""

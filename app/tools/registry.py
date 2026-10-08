@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from types import ModuleType
 
 import app.tools
-from app.db.models import User
+from app.auth.kontext import NutzerKontext
 from app.medien import PDF
 from app.observability.audit import protokolliere
 from app.tools.base import (
@@ -100,7 +100,7 @@ def kuerze(text: str, max_zeichen: int = MAX_ERGEBNIS_ZEICHEN) -> str:
 
 
 async def fuehre_tool_aus(
-    tool: Tool, params: dict, user: User, kontext: ToolKontext
+    tool: Tool, params: dict, user: NutzerKontext, kontext: ToolKontext
 ) -> ToolErgebnis:
     """Führt das Tool aus. Fehler werden zu einem Fehlertext, nie zu einer Ausnahme."""
     start = time.monotonic()

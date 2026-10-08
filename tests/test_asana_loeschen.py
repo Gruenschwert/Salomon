@@ -110,7 +110,7 @@ async def test_erstes_ok_fuehrt_noch_nichts_aus_sondern_fragt_nach(
     # Ohne zweite Bestätigung läuft keine Operation, auch nicht die harmlose erste.
     assert _geschrieben(fake) == []
     assert await _status(session_fabrik, anfrage.approval_id) == "bestätigung"
-    assert await freigaben.anzahl_offen() == 1
+    assert await freigaben.anzahl_offen(admin) == 1
 
 
 async def test_zweite_bestaetigung_fuehrt_den_ganzen_satz_aus(baue, admin, fake, session_fabrik):

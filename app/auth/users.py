@@ -1,7 +1,10 @@
 """Nutzer und Rollen. Die Datenbank ist die Wahrheit; die .env dient nur der Übernahme."""
 
+from types import MappingProxyType
+
 from sqlalchemy import select
 
+from app.auth.kontext import NutzerKontext
 from app.config import Settings
 from app.db.models import (
     ROLLE_ADMIN,
@@ -49,22 +52,33 @@ async def rollen_von(session_fabrik: SessionFabrik, user_id: int) -> frozenset[s
 
 async def finde_erlaubten_nutzer(
     session_fabrik: SessionFabrik, telegram_id: int, name: str = ""
-) -> User | None:
-    """Liefert die aktive Person zur Telegram-ID oder None, wenn sie nicht bedient wird."""
+) -> NutzerKontext | None:
+    """Baut den NutzerKontext zur Telegram-ID oder liefert None, wenn die Person nicht bedient
+    wird (unbekannt, inaktiv oder gesperrt). Die Identität kommt allein aus der Datenbank."""
     async with session_fabrik() as session:
         user = await session.scalar(
             select(User).where(
                 User.telegram_id == telegram_id, User.aktiv.is_(True), User.gesperrt_am.is_(None)
             )
         )
+        if user is None:
+            return None
         # Der Name aus Telegram ist nur der Startwert; danach gilt, was im Profil steht.
-        if user is not None and name and not user.anzeigename:
+        if name and not user.anzeigename:
             user.anzeigename = name[:200]
             await session.commit()
-    if user is not None:
-        rollen = await rollen_von(session_fabrik, user.id)
-        user.rolle = "admin" if ROLLE_ADMIN in rollen else "user"
-    return user
+        rollen = frozenset(
+            await session.scalars(select(UserRole.role_name).where(UserRole.user_id == user.id))
+        )
+    return NutzerKontext(
+        nutzer_id=user.id,
+        telegram_id=user.telegram_id,
+        anzeigename=user.anzeigename,
+        rollen=rollen,
+        einstellungen=MappingProxyType(
+            {"ton": user.ton, "zeitzone": user.zeitzone, "tageslimit_eur": user.tageslimit_eur}
+        ),
+    )
 
 
 async def aktive_admins(session_fabrik: SessionFabrik) -> list[User]:
