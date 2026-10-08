@@ -4,10 +4,11 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from app.agent.gedaechtnis import GedaechtnisFehler, lade_notizen, merke, vergiss_alles
 from app.auth.kontext import NutzerKontext
-from app.auth.rechte import ADMIN_NUTZER, RECHTE
+from app.auth.rechte import ADMIN_KOSTEN_ALLE, ADMIN_NUTZER, RECHTE
 from app.auth.users import (
     NutzerFehler,
     aendere_profil,
@@ -21,6 +22,7 @@ from app.auth.zugaenge import DIENSTE, Zugaenge
 from app.db.models import ROLLEN
 from app.db.session import SessionFabrik
 from app.observability.audit import protokolliere
+from app.observability.costs import ERLAUBTE_ZEITRAEUME, Kosten, als_euro
 from app.tools.base import ToolFehler
 
 # So lange wartet der Bot nach /verbinden auf die Nachricht mit dem Token.
@@ -72,9 +74,15 @@ class Befehl:
 class Befehle:
     """Alle Slash-Befehle mit ihren Abhängigkeiten. Der Kanal ruft `fuehre_aus` auf."""
 
-    def __init__(self, session_fabrik: SessionFabrik, zugaenge: Zugaenge | None = None) -> None:
+    def __init__(
+        self,
+        session_fabrik: SessionFabrik,
+        zugaenge: Zugaenge | None = None,
+        kosten: Kosten | None = None,
+    ) -> None:
         self._session_fabrik = session_fabrik
         self._zugaenge = zugaenge
+        self._kosten = kosten
         # (Chat-ID, Telegram-ID) -> (Dienst, gültig bis). Die nächste Nachricht dieser Person
         # in diesem Chat ist dann ein Geheimnis und geht an niemanden sonst.
         self._erwartet: dict[tuple[int, int], tuple[str, float]] = {}
@@ -88,6 +96,7 @@ class Befehle:
             ),
             Befehl("trennen", "eigenen Zugang entfernen, z. B. /trennen asana", self._trennen),
             Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
+            Befehl("kosten", "deine Kosten: /kosten oder /kosten 7 (1, 3, 7, 30)", self._kosten_),
             Befehl("profil", "Name, Anrede und Zeitzone anzeigen oder ändern", self._profil),
             Befehl("merken", "persönliche Notiz speichern: /merken <text>", self._merken),
             Befehl("gemerkt", "zeigt deine Notizen", self._gemerkt),
@@ -108,6 +117,12 @@ class Befehle:
             Befehl("sperren", "Person sperren: /sperren <name>", self._sperren, ADMIN_NUTZER),
             Befehl(
                 "entsperren", "Sperre aufheben: /entsperren <name>", self._entsperren, ADMIN_NUTZER
+            ),
+            Befehl(
+                "limit",
+                "Tageslimit einer Person: /limit <name> <euro> (oder standard)",
+                self._limit,
+                ADMIN_NUTZER,
             ),
         )
 
@@ -146,6 +161,98 @@ class Befehle:
             return await befehl.funktion(nutzer, argumente, chat_id, privat)
         except (ToolFehler, NutzerFehler, GedaechtnisFehler) as exc:
             return str(exc)
+
+    # ---------------------------------------------------------------- Kosten
+
+    async def _kosten_(self, nutzer: NutzerKontext, argumente: list[str], *_: object) -> str:
+        if self._kosten is None:
+            return "Die Kostenauswertung ist hier nicht eingerichtet."
+        alle = bool(argumente) and argumente[-1].lower() == "alle"
+        zahlen = [a for a in argumente if a.lower() != "alle"]
+        try:
+            tage = int(zahlen[0]) if zahlen else 1
+        except ValueError:
+            tage = 0
+        if tage not in ERLAUBTE_ZEITRAEUME or len(zahlen) > 1:
+            return "So geht es: /kosten, /kosten 3, /kosten 7 oder /kosten 30"
+        if alle:
+            if not nutzer.darf(ADMIN_KOSTEN_ALLE):
+                return "Die Kosten aller sieht nur, wer das Recht dafür hat. Deine eigenen: /kosten"
+            return await self._kosten_alle(tage)
+        return await self._kosten_eigene(nutzer, tage)
+
+    @staticmethod
+    def _zeitraum_text(tage: int, von, bis) -> str:
+        if tage == 1:
+            return f"heute ({bis:%d.%m.})"
+        return f"letzte {tage} Tage ({von:%d.%m.} bis {bis:%d.%m.})"
+
+    async def _kosten_eigene(self, nutzer: NutzerKontext, tage: int) -> str:
+        auswertung = await self._kosten.auswertung(nutzer.id, tage)
+        zeilen = [
+            f"Deine Kosten, {self._zeitraum_text(tage, auswertung.von, auswertung.bis)}:",
+            f"Gesamt: {als_euro(auswertung.summe_eur)} bei {auswertung.anfragen} "
+            f"Anfrage{'' if auswertung.anfragen == 1 else 'n'} an die KI",
+        ]
+        if auswertung.je_modell:
+            zeilen.append("Nach Modell:")
+            zeilen += [
+                f"- {modell}: {als_euro(summe)} ({anzahl})"
+                for modell, (summe, anzahl) in auswertung.je_modell.items()
+            ]
+        if auswertung.je_grund:
+            zeilen.append("Modellwahl:")
+            zeilen += [f"- {grund}: {anzahl}" for grund, anzahl in auswertung.je_grund.items()]
+        if auswertung.groesster_tag and tage > 1:
+            tag, summe = auswertung.groesster_tag
+            zeilen.append(f"Größter Tag: {tag:%d.%m.} mit {als_euro(summe)}")
+        limit = await self._kosten.limit_von(nutzer.id)
+        zeilen.append(
+            f"Heute: {als_euro(await self._kosten.heute_eur(nutzer.id))} von {als_euro(limit)} "
+            "Tageslimit"
+        )
+        return "\n".join(zeilen)
+
+    async def _kosten_alle(self, tage: int) -> str:
+        """Kosten je Person für Admins: nur Namen und Zahlen, nie Inhalte."""
+        personen = await self._kosten.auswertung_alle(tage)
+        von, bis = self._kosten._zeitraum(tage)
+        zeilen = [f"Kosten aller, {self._zeitraum_text(tage, von, bis)}:"]
+        zeilen += [f"- {name}: {als_euro(summe)} ({anzahl})" for name, summe, anzahl in personen]
+        if not personen:
+            zeilen.append("Keine Anfragen in diesem Zeitraum.")
+        summe = sum((betrag for _, betrag, _ in personen), start=Decimal(0))
+        anfragen = sum(anzahl for _, _, anzahl in personen)
+        zeilen.append(f"Summe: {als_euro(summe)} bei {anfragen} Anfragen an die KI")
+        return "\n".join(zeilen)
+
+    async def _limit(
+        self, nutzer: NutzerKontext, argumente: list[str], *_: object
+    ) -> "str | BefehlsAntwort":
+        if self._kosten is None:
+            return "Limits sind hier nicht eingerichtet."
+        if len(argumente) < 2:
+            return "So geht es: /limit <name> <euro> oder /limit <name> standard"
+        person = await finde_nutzer(self._session_fabrik, " ".join(argumente[:-1]))
+        name = person.anzeigename or str(person.telegram_id)
+        angabe = argumente[-1].lower().replace(",", ".").removesuffix("€")
+        if angabe == "standard":
+            euro, text = None, f"Tageslimit von {name} auf den Standard zurücksetzen"
+        else:
+            try:
+                euro = Decimal(angabe)
+            except InvalidOperation:
+                return "Das Limit muss eine Zahl in Euro sein, z. B. /limit Lea 10"
+            if not euro.is_finite() or euro < 0 or euro > 1000:
+                return "Das Limit muss zwischen 0 und 1000 Euro liegen."
+            text = f"Tageslimit von {name} auf {als_euro(euro)} setzen"
+        return self._merke_aktion(
+            nutzer,
+            "limit",
+            text,
+            {"telegram_id": person.telegram_id, "euro": str(euro) if euro is not None else None},
+            lambda: self._kosten.setze_limit(person.id, euro),
+        )
 
     # ---------------------------------------------------------------- Profil und Notizen
 

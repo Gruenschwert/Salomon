@@ -328,7 +328,7 @@ async def test_nicht_persoenliche_zugriffe_gehen_mit_der_laufzeitrolle(
     alarme = Alarme(laufzeit_fabrik)
     alarme.verbinde(sende)
     kosten = Kosten(settings, laufzeit_fabrik, alarme)
-    await kosten.verbuche(admin.id, 0, 100_000)
+    await kosten.verbuche(admin, 0, 100_000)
     assert await kosten.heute_eur() > 0
 
 

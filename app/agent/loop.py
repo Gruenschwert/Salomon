@@ -50,9 +50,6 @@ WARTET_AUF_FREIGABE_TEXT = (
     "Wartet auf Freigabe des Nutzers. Das Tool wurde NICHT ausgeführt. Der Nutzer sieht jetzt "
     "eine Vorschau mit den Buttons ✅ / ❌. Beende die Runde mit einem kurzen Hinweis darauf."
 )
-TAGESLIMIT_TEXT = (
-    "Das Tageslimit für KI-Kosten ist erreicht. Neue Anfragen sind ab morgen wieder möglich."
-)
 DIENST_FEHLER_TEXT = "Der KI-Dienst ist gerade nicht erreichbar. Bitte versuche es später erneut."
 ABLEHNUNG_TEXT = "Diese Anfrage kann ich nicht beantworten."
 LEERE_ANTWORT_TEXT = "Dazu habe ich keine Antwort erhalten. Bitte formuliere die Frage neu."
@@ -87,8 +84,8 @@ class Agent:
         self._kontext = ToolKontext(settings=settings, session_fabrik=session_fabrik)
 
     async def beantworte(self, nachricht: EingehendeNachricht, user: NutzerKontext) -> Antwort:
-        if await self._kosten.limit_erreicht():
-            return Antwort(text=TAGESLIMIT_TEXT)
+        if gesperrt := await self._kosten.limit_erreicht(user.id):
+            return Antwort(text=gesperrt)
         verlauf = await lade_verlauf(
             self._session_fabrik, user, nachricht.chat_id, self._settings.history_max_messages
         )
@@ -132,7 +129,7 @@ class Agent:
         tool_abgeschnitten = False
         for runde in range(1, settings.agent_max_rounds + 1):
             response = await self._client.messages.create(**anfrage, messages=messages)
-            await self._kosten.verbuche(user.id, *_tokens(response.usage))
+            await self._kosten.verbuche(user, modell=anfrage["model"], **_tokens(response.usage))
             text = _text(response)
             if response.stop_reason == "tool_use":
                 tool_abgeschnitten = False
@@ -291,14 +288,15 @@ def _verlaufstext(nachricht: EingehendeNachricht) -> str:
     return f"{marken} {text}".strip()
 
 
-def _tokens(usage: anthropic.types.Usage) -> tuple[int, int]:
-    """Input- und Output-Tokens; Cache-Tokens zählen vorsichtshalber voll als Input."""
-    eingabe = (
-        usage.input_tokens
-        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
-        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
-    )
-    return eingabe, usage.output_tokens
+def _tokens(usage: anthropic.types.Usage) -> dict[str, int]:
+    """Die Token-Arten einer Antwort, getrennt gebucht: Eingabe, Ausgabe, Cache lesen und
+    Cache schreiben haben unterschiedliche Preise."""
+    return {
+        "input_tokens": usage.input_tokens or 0,
+        "output_tokens": usage.output_tokens or 0,
+        "cache_lese_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+        "cache_schreib_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    }
 
 
 def _text(response: anthropic.types.Message) -> str:

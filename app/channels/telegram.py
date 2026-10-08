@@ -263,12 +263,13 @@ class TelegramKanal:
             return None
         if not user.ist_admin:
             return NUR_ADMIN_TEXT
-        limit = self._settings.daily_cost_limit_eur
+        limit = self._settings.daily_cost_limit_total_eur
         return "\n".join(
             [
                 f"gs-assistant {__version__}",
                 f"Uptime: {_als_dauer(time.monotonic() - self._gestartet)}",
-                f"Kosten heute: {als_euro(await self._kosten.heute_eur())} von {als_euro(limit)}",
+                f"Kosten heute (alle): {als_euro(await self._kosten.heute_eur())} "
+                f"von {als_euro(limit)}",
                 f"Eigene offene Freigaben: {await self._freigaben.anzahl_offen(user)}",
             ]
         )

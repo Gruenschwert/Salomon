@@ -20,6 +20,15 @@ class Alarme:
         """Legt fest, worüber Alarme verschickt werden (Chat-ID = Telegram-ID des Admins)."""
         self._sende = sende
 
+    async def an_person(self, telegram_id: int, text: str) -> None:
+        """Schickt einen Hinweis an genau eine Person. Schlägt nie fehl."""
+        if self._sende is None:
+            return
+        try:
+            await self._sende(telegram_id, text)
+        except Exception as exc:
+            log.error("Hinweis an %s nicht zustellbar: %s", telegram_id, type(exc).__name__)
+
     async def melde(self, text: str) -> None:
         """Schickt den Text an alle Admins. Schlägt nie fehl; Probleme landen nur im Log."""
         log.warning("Alarm: %s", text)

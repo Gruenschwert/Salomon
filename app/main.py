@@ -69,7 +69,7 @@ def main() -> None:
         kosten=kosten,
         alarme=alarme,
         beim_start=beim_start,
-        befehle=Befehle(session_fabrik, Zugaenge(kontext)),
+        befehle=Befehle(session_fabrik, Zugaenge(kontext), kosten),
     )
     alarme.verbinde(kanal.sende_antwort)
     kontext.dateien.verbinde(kanal.lade_datei)

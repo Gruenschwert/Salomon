@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     # Höchstzahl der Runden (Claude-Aufrufe) je Nachricht; früher MAX_TOOL_ITERATIONS
     agent_max_rounds: int = 25
     max_output_tokens: int = 8000
+    # Tageslimit je Person (überschreibbar mit /limit) und Gesamtlimit aller zusammen
     daily_cost_limit_eur: Decimal = Decimal("5")
+    daily_cost_limit_total_eur: Decimal = Decimal("20")
     history_max_messages: int = 20
     # Nachrichten werden nach so vielen Tagen gelöscht (0 = nie)
     message_retention_days: int = 90
