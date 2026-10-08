@@ -166,6 +166,8 @@ async def test_album_wird_als_eine_anfrage_mit_hoechstens_fuenf_fotos_uebergeben
     baue_kanal, empfangen, gesendet
 ):
     kanal = baue_kanal()
+    # Länger als die Datenbankzugriffe zwischen zwei Fotos dauern.
+    kanal.album_wartezeit = 0.3
     fotos = [FakeFoto(800, 600, JPEG + bytes([n])) for n in range(6)]
     # Telegram liefert die Fotos eines Albums als einzelne Nachrichten, nicht immer in Reihenfolge.
     for nummer in (2, 0, 1, 3, 5, 4):
@@ -174,7 +176,8 @@ async def test_album_wird_als_eine_anfrage_mit_hoechstens_fuenf_fotos_uebergeben
             _update([fotos[nummer]], text=text, album="g1", message_id=100 + nummer), None
         )
     assert empfangen == []
-    await asyncio.sleep(0.1)
+    # Auf den Abschluss des Albums warten statt auf eine feste Zeit.
+    await asyncio.gather(*(album.aufgabe for album in list(kanal._alben.values())))
 
     (nachricht,) = empfangen
     assert nachricht.text == "Wochenplan"

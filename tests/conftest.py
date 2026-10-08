@@ -1,11 +1,19 @@
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
 
 import tests.beispiel_tools
 from app.agent.loop import Agent
 from app.auth.approvals import Freigaben
-from app.auth.users import finde_erlaubten_nutzer, synchronisiere_whitelist
+from app.auth.users import finde_erlaubten_nutzer, uebernehme_bestand
 from app.config import Settings
 from app.db.models import Base
 from app.db.session import erstelle_session_fabrik
@@ -18,6 +26,62 @@ from tests.beispiel_tools.schreibend import BeispielSchreiben
 ERLAUBT_ID = 111
 ADMIN_ID = 222
 FREMD_ID = 999
+# Tabellen mit festen Stammdaten aus der Migration bleiben zwischen den Tests stehen.
+_STAMMDATEN = {"roles", "alembic_version"}
+
+
+def _sqlalchemy_url(url: str) -> str:
+    return make_url(url).set(drivername="postgresql+asyncpg").render_as_string(False)
+
+
+def migriere(url: str, ziel: str = "head") -> None:
+    """Führt die Alembic-Migrationen aus, genau wie der Container beim Start."""
+    alt = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = url
+    try:
+        command.upgrade(Config("alembic.ini"), ziel)
+    finally:
+        if alt is None:
+            del os.environ["DATABASE_URL"]
+        else:
+            os.environ["DATABASE_URL"] = alt
+
+
+@pytest.fixture(scope="session")
+def pg_server():
+    """Ein echter PostgreSQL-Server für die ganze Testsitzung.
+
+    Mit TEST_DATABASE_URL (z. B. in der CI mit Service-Container) wird dieser Server benutzt,
+    sonst startet `pgserver` einen eigenen in einem temporären Verzeichnis.
+    """
+    if extern := os.environ.get("TEST_DATABASE_URL"):
+        yield _sqlalchemy_url(extern)
+        return
+    import pgserver
+
+    with tempfile.TemporaryDirectory(prefix="gs-pg-") as verzeichnis:
+        server = pgserver.get_server(Path(verzeichnis), cleanup_mode="stop")
+        try:
+            yield _sqlalchemy_url(server.get_uri())
+        finally:
+            server.cleanup()
+
+
+@pytest.fixture(scope="session")
+def pg_url(pg_server) -> str:
+    """Die Test-Datenbank, einmal je Sitzung über die Migrationen aufgebaut."""
+    migriere(pg_server)
+    return pg_server
+
+
+@pytest.fixture
+async def engine(pg_url):
+    engine = create_async_engine(pg_url, poolclass=NullPool)
+    tabellen = ", ".join(sorted(set(Base.metadata.tables) - _STAMMDATEN))
+    async with engine.begin() as verbindung:
+        await verbindung.execute(text(f"TRUNCATE {tabellen} RESTART IDENTITY CASCADE"))
+    yield engine
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -30,20 +94,11 @@ def settings() -> Settings:
         anthropic_api_key="test-key",
         model_default="test-modell",
         model_cheap="test-modell-guenstig",
-        database_url="sqlite+aiosqlite://",
+        database_url="postgresql+asyncpg://test:test@localhost/test",
         price_input_usd_per_mtok="2",
         price_output_usd_per_mtok="10",
         usd_eur_rate="0.5",
     )
-
-
-@pytest.fixture
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as verbindung:
-        await verbindung.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 
 @pytest.fixture
@@ -53,7 +108,7 @@ def session_fabrik(engine):
 
 @pytest.fixture
 async def user(settings, session_fabrik):
-    await synchronisiere_whitelist(session_fabrik, settings)
+    await uebernehme_bestand(session_fabrik, settings)
     return await finde_erlaubten_nutzer(session_fabrik, ERLAUBT_ID)
 
 

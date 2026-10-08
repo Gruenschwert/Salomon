@@ -7,7 +7,7 @@ import anthropic
 from app import __version__
 from app.agent.loop import Agent
 from app.auth.approvals import Freigaben
-from app.auth.users import synchronisiere_whitelist
+from app.auth.users import uebernehme_bestand
 from app.channels.telegram import TelegramKanal
 from app.config import Settings, get_settings
 from app.db.session import db_check, erstelle_engine, erstelle_session_fabrik
@@ -48,7 +48,7 @@ def main() -> None:
 
     async def beim_start() -> None:
         await db_check(engine)
-        await synchronisiere_whitelist(session_fabrik, settings)
+        await uebernehme_bestand(session_fabrik, settings)
         log.info("gs-assistant %s gestartet", __version__)
         await alarme.melde(f"✅ gs-assistant {__version__} wurde gestartet.")
         if settings.max_output_tokens < MIN_OUTPUT_TOKENS_EMPFOHLEN:

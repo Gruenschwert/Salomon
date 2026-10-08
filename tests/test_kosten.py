@@ -21,13 +21,14 @@ def test_kostenberechnung(kosten):
     assert kosten.berechne_eur(500_000, 100_000) == Decimal("1")
 
 
-async def test_verbrauch_wird_je_tag_und_nutzer_summiert(kosten, user, session_fabrik):
+async def test_jeder_api_aufruf_wird_als_eigene_zeile_gebucht(kosten, user, session_fabrik):
     await kosten.verbuche(user.id, 1000, 200)
     await kosten.verbuche(user.id, 500, 100)
     async with session_fabrik() as session:
-        (eintrag,) = list(await session.scalars(select(Usage)))
-    assert (eintrag.input_tokens, eintrag.output_tokens) == (1500, 300)
-    assert eintrag.datum == kosten.heute()
+        erste, zweite = list(await session.scalars(select(Usage).order_by(Usage.id)))
+    assert (erste.eingabe_tokens, erste.ausgabe_tokens) == (1000, 200)
+    assert (zweite.eingabe_tokens, zweite.ausgabe_tokens) == (500, 100)
+    assert erste.datum == kosten.heute() and erste.user_id == user.id
     assert await kosten.heute_eur() == kosten.berechne_eur(1500, 300)
 
 

@@ -1,4 +1,4 @@
-"""Datenbank-Modelle (Bauplan Abschnitt 7, plus `notizen` für das Demo-Tool und
+"""Datenbank-Modelle (Bauplan Abschnitt 7 und MEHRBENUTZER.md, plus `notizen` für das Demo-Tool und
 `asana_operationen` für den Ausführungsstand von Asana-Änderungssätzen und
 `telegram_dateien` für Verweise auf Dateien aus dem Chat)."""
 
@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -23,7 +24,17 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 ROLLE_ADMIN = "admin"
-ROLLE_USER = "user"
+ROLLE_MITARBEITER = "mitarbeiter"
+ROLLE_BUCHHALTUNG = "buchhaltung"
+ROLLE_APOTHEKEN_UPDATES = "apotheken_updates"
+ROLLEN = {
+    ROLLE_ADMIN: "Verwaltung von Nutzern, Rollen und Kosten",
+    ROLLE_MITARBEITER: "Standardrolle für Mitarbeiter",
+    ROLLE_BUCHHALTUNG: "Buchhaltung",
+    ROLLE_APOTHEKEN_UPDATES: "Apotheken-Scan und Sortenabgleich",
+}
+STANDARD_ZEITZONE = "Europe/Berlin"
+STANDARD_TON = "du"
 
 STATUS_OFFEN = "offen"
 # Erstes ✅ ist da, die zweite Rückfrage (Löschen) steht noch aus.
@@ -65,10 +76,68 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
-    name: Mapped[str] = mapped_column(String(200), default="")
-    rolle: Mapped[str] = mapped_column(String(20), default=ROLLE_USER)
+    anzeigename: Mapped[str] = mapped_column(String(200), default="")
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
+    zeitzone: Mapped[str] = mapped_column(String(60), default=STANDARD_ZEITZONE)
+    ton: Mapped[str] = mapped_column(String(10), default=STANDARD_TON)
+    # Eigenes Tageslimit; NULL = Standard aus DAILY_COST_LIMIT_EUR
+    tageslimit_eur: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     erstellt_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+    gesperrt_am: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+class Role(Base):
+    __tablename__ = "roles"
+
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    beschreibung: Mapped[str] = mapped_column(String(200), default="")
+
+
+class UserRole(Base):
+    """Eine Person kann mehrere Rollen haben."""
+
+    __tablename__ = "user_roles"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    role_name: Mapped[str] = mapped_column(ForeignKey("roles.name"), primary_key=True)
+    vergeben_von: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    vergeben_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+
+
+class UserSecret(Base):
+    """Verschlüsselte Zugangsdaten einer Person zu einem Dienst. Nie Klartext."""
+
+    __tablename__ = "user_secrets"
+    __table_args__ = (UniqueConstraint("user_id", "dienst"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    dienst: Mapped[str] = mapped_column(String(40))
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary)
+    schluessel_version: Mapped[int] = mapped_column(Integer, default=1)
+    erstellt_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+    aktualisiert_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+
+
+class UserMemory(Base):
+    """Kurze persönliche Notizen und Vorlieben einer Person."""
+
+    __tablename__ = "user_memory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    inhalt: Mapped[str] = mapped_column(Text)
+    erstellt_am: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+
+
+class SystemEinstellung(Base):
+    """Merker des Systems, z. B. dass der Bestand aus der .env übernommen wurde."""
+
+    __tablename__ = "system_einstellungen"
+
+    schluessel: Mapped[str] = mapped_column(String(60), primary_key=True)
+    wert: Mapped[str] = mapped_column(Text, default="")
 
 
 class Message(Base):
@@ -110,13 +179,22 @@ class AuditLog(Base):
 
 
 class Usage(Base):
+    """Verbrauch je Modellantwort. Enthält nur Zahlen, nie Inhalte."""
+
     __tablename__ = "usage"
 
-    datum: Mapped[date] = mapped_column(Date, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
-    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
-    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    zeit: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
+    datum: Mapped[date] = mapped_column(Date, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    modell: Mapped[str] = mapped_column(String(80), default="")
+    eingabe_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    ausgabe_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cache_lese_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cache_schreib_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    kosten_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
     kosten_eur: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
+    grund_modellwahl: Mapped[str] = mapped_column(String(200), default="")
 
 
 class Notiz(Base):

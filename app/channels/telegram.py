@@ -31,7 +31,7 @@ from app.channels.base import (
     NachrichtenHandler,
 )
 from app.config import Settings
-from app.db.models import ROLLE_ADMIN, TelegramDatei
+from app.db.models import TelegramDatei
 from app.db.session import SessionFabrik
 from app.medien import bild_medientyp as medientyp
 from app.observability.alerts import Alarme
@@ -236,7 +236,7 @@ class TelegramKanal:
         user = await self._erlaubter_nutzer(telegram_id)
         if user is None:
             return None
-        if user.rolle != ROLLE_ADMIN:
+        if user.rolle != "admin":
             return NUR_ADMIN_TEXT
         limit = self._settings.daily_cost_limit_eur
         return "\n".join(

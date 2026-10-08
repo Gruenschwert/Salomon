@@ -51,19 +51,16 @@ class Kosten:
         kosten = self.berechne_eur(input_tokens, output_tokens)
         vorher = await self.heute_eur()
         async with self._session_fabrik() as session:
-            eintrag = await session.get(Usage, (self.heute(), user_id))
-            if eintrag is None:
-                eintrag = Usage(
+            session.add(
+                Usage(
                     datum=self.heute(),
                     user_id=user_id,
-                    input_tokens=0,
-                    output_tokens=0,
-                    kosten_eur=Decimal(0),
+                    eingabe_tokens=input_tokens,
+                    ausgabe_tokens=output_tokens,
+                    kosten_usd=kosten / self._settings.usd_eur_rate,
+                    kosten_eur=kosten,
                 )
-                session.add(eintrag)
-            eintrag.input_tokens += input_tokens
-            eintrag.output_tokens += output_tokens
-            eintrag.kosten_eur += kosten
+            )
             await session.commit()
 
         limit = self._settings.daily_cost_limit_eur
