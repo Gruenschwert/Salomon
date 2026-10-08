@@ -73,6 +73,21 @@ class Settings(BaseSettings):
     asana_attachment_view_max_mb: float = 5
     asana_api_aufruf_enabled: bool = True
 
+    # Mail (IMAP/SMTP). Die Server sind die von united-domains und gelten für jedes Postfach,
+    # das beim Verbinden keine eigenen nennt.
+    mail_imap_host: str = "imaps.udag.de"
+    mail_imap_port: int = 993
+    mail_smtp_host: str = "smtps.udag.de"
+    mail_smtp_port: int = 465
+    # Obergrenze für den Text einer Mail, der an das Modell geht
+    mail_max_zeichen: int = 12000
+    mail_anhang_max_mb: float = 5
+    mail_max_senden_pro_tag: int = 20
+    mail_max_empfaenger: int = 10
+    # So lange bleibt gelesener Mailinhalt verschlüsselt im Gesprächsverlauf
+    mail_kontext_ttl_stunden: int = 24
+    mail_max_anmeldungen_pro_minute: int = 6
+
     # Foto-Eingang
     photo_max_mb: float = 5
 

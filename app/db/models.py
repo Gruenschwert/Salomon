@@ -34,6 +34,8 @@ ROLLEN = {
     ROLLE_APOTHEKEN_UPDATES: "Apotheken-Scan und Sortenabgleich",
 }
 STANDARD_ZEITZONE = "Europe/Berlin"
+# Label eines Zugangs, wenn es je Dienst nur einen gibt (Asana)
+STANDARD_LABEL = "standard"
 STANDARD_TON = "du"
 
 STATUS_OFFEN = "offen"
@@ -108,11 +110,15 @@ class UserSecret(Base):
     """Verschlüsselte Zugangsdaten einer Person zu einem Dienst. Nie Klartext."""
 
     __tablename__ = "user_secrets"
-    __table_args__ = (UniqueConstraint("user_id", "dienst"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "dienst", "label", name="uq_user_secrets_user_dienst_label"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     dienst: Mapped[str] = mapped_column(String(40))
+    # Frei wählbarer Name des Zugangs, z. B. das Postfach „shop“. Kein Geheimnis.
+    label: Mapped[str] = mapped_column(String(60), default=STANDARD_LABEL)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
     nonce: Mapped[bytes] = mapped_column(LargeBinary)
     schluessel_version: Mapped[int] = mapped_column(Integer, default=1)
@@ -148,6 +154,9 @@ class Message(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     rolle: Mapped[str] = mapped_column(String(20))
     inhalt: Mapped[Any] = mapped_column(JSON)
+    # Mailinhalt, mit dem Schlüssel der Person verschlüsselt. Er wird nach
+    # MAIL_KONTEXT_TTL_STUNDEN entfernt; `inhalt` enthält dann nur noch einen Platzhalter.
+    inhalt_verschluesselt: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     zeit: Mapped[datetime] = mapped_column(UtcDateTime, default=jetzt)
 
 

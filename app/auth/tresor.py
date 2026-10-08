@@ -17,11 +17,12 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import delete, select
 
 from app.config import Settings
-from app.db.models import UserSecret, jetzt
+from app.db.models import STANDARD_LABEL, UserSecret, jetzt
 from app.db.session import SessionFabrik, db_sitzung
 
 SCHLUESSEL_BYTES = 32
 NONCE_BYTES = 12
+VERSION_BYTES = 2
 SCHLUESSEL_ERZEUGEN = (
     'python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"'
 )
@@ -75,24 +76,35 @@ class Tresor:
         return AESGCM(abgeleitet)
 
     @staticmethod
-    def _bindung(user_id: int, dienst: str) -> bytes:
-        """Bindet den Geheimtext an Person und Dienst; an anderer Stelle ist er wertlos."""
-        return f"{user_id}:{dienst}".encode()
+    def _bindung(user_id: int, dienst: str, label: str = STANDARD_LABEL) -> bytes:
+        """Bindet den Geheimtext an Person, Dienst und Label; an anderer Stelle ist er
+        wertlos. Das Standardlabel bleibt ohne Zusatz, damit ältere Einträge lesbar sind."""
+        if label == STANDARD_LABEL:
+            return f"{user_id}:{dienst}".encode()
+        return f"{user_id}:{dienst}:{label}".encode()
 
-    def verschluessle(self, user_id: int, dienst: str, klartext: str) -> tuple[bytes, bytes, int]:
+    def verschluessle(
+        self, user_id: int, dienst: str, klartext: str, label: str = STANDARD_LABEL
+    ) -> tuple[bytes, bytes, int]:
         """Liefert (Geheimtext, Nonce, Schlüsselversion)."""
         nonce = os.urandom(NONCE_BYTES)
         geheimtext = self._schluessel_fuer(user_id, self.aktuelle_version).encrypt(
-            nonce, klartext.encode("utf-8"), self._bindung(user_id, dienst)
+            nonce, klartext.encode("utf-8"), self._bindung(user_id, dienst, label)
         )
         return geheimtext, nonce, self.aktuelle_version
 
     def entschluessle(
-        self, user_id: int, dienst: str, geheimtext: bytes, nonce: bytes, version: int
+        self,
+        user_id: int,
+        dienst: str,
+        geheimtext: bytes,
+        nonce: bytes,
+        version: int,
+        label: str = STANDARD_LABEL,
     ) -> str:
         try:
             klartext = self._schluessel_fuer(user_id, version).decrypt(
-                nonce, geheimtext, self._bindung(user_id, dienst)
+                nonce, geheimtext, self._bindung(user_id, dienst, label)
             )
         except InvalidTag:
             raise TresorFehler(
@@ -101,19 +113,43 @@ class Tresor:
             ) from None
         return klartext.decode("utf-8")
 
+    def versiegle(self, user_id: int, zweck: str, klartext: str) -> bytes:
+        """Verschlüsselt einen Text der Person zu einem einzigen Wert (Version, Nonce,
+        Geheimtext), z. B. Mailinhalt im Verlauf. `zweck` bindet ihn an seine Verwendung."""
+        geheimtext, nonce, version = self.verschluessle(user_id, zweck, klartext)
+        return version.to_bytes(VERSION_BYTES, "big") + nonce + geheimtext
+
+    def entsiegle(self, user_id: int, zweck: str, versiegelt: bytes) -> str:
+        kopf = VERSION_BYTES + NONCE_BYTES
+        if len(versiegelt) <= kopf:
+            raise TresorFehler("Der verschlüsselte Wert ist unvollständig.")
+        version = int.from_bytes(versiegelt[:VERSION_BYTES], "big")
+        return self.entschluessle(
+            user_id, zweck, versiegelt[kopf:], versiegelt[VERSION_BYTES:kopf], version
+        )
+
+
+def _eintrag(nutzer_id: int, dienst: str, label: str):
+    return select(UserSecret).where(
+        UserSecret.user_id == nutzer_id, UserSecret.dienst == dienst, UserSecret.label == label
+    )
+
 
 async def speichere_geheimnis(
-    session_fabrik: SessionFabrik, tresor: Tresor, nutzer: object, dienst: str, klartext: str
+    session_fabrik: SessionFabrik,
+    tresor: Tresor,
+    nutzer: object,
+    dienst: str,
+    klartext: str,
+    label: str = STANDARD_LABEL,
 ) -> None:
     """Legt die Zugangsdaten der Person zum Dienst verschlüsselt ab oder ersetzt sie."""
     nutzer_id = getattr(nutzer, "nutzer_id", nutzer)
-    geheimtext, nonce, version = tresor.verschluessle(nutzer_id, dienst, klartext)
+    geheimtext, nonce, version = tresor.verschluessle(nutzer_id, dienst, klartext, label)
     async with db_sitzung(session_fabrik, nutzer_id) as session:
-        eintrag = await session.scalar(
-            select(UserSecret).where(UserSecret.user_id == nutzer_id, UserSecret.dienst == dienst)
-        )
+        eintrag = await session.scalar(_eintrag(nutzer_id, dienst, label))
         if eintrag is None:
-            eintrag = UserSecret(user_id=nutzer_id, dienst=dienst)
+            eintrag = UserSecret(user_id=nutzer_id, dienst=dienst, label=label)
             session.add(eintrag)
         eintrag.ciphertext = geheimtext
         eintrag.nonce = nonce
@@ -123,7 +159,11 @@ async def speichere_geheimnis(
 
 
 async def lade_geheimnis(
-    session_fabrik: SessionFabrik, tresor: Tresor, nutzer: object, dienst: str
+    session_fabrik: SessionFabrik,
+    tresor: Tresor,
+    nutzer: object,
+    dienst: str,
+    label: str = STANDARD_LABEL,
 ) -> str | None:
     """Entschlüsselt die eigenen Zugangsdaten zum Dienst; None, wenn nichts verbunden ist.
 
@@ -131,33 +171,51 @@ async def lade_geheimnis(
     """
     nutzer_id = getattr(nutzer, "nutzer_id", nutzer)
     async with db_sitzung(session_fabrik, nutzer_id) as session:
-        eintrag = await session.scalar(
-            select(UserSecret).where(UserSecret.user_id == nutzer_id, UserSecret.dienst == dienst)
-        )
+        eintrag = await session.scalar(_eintrag(nutzer_id, dienst, label))
     if eintrag is None:
         return None
     return tresor.entschluessle(
-        nutzer_id, dienst, eintrag.ciphertext, eintrag.nonce, eintrag.schluessel_version
+        nutzer_id, dienst, eintrag.ciphertext, eintrag.nonce, eintrag.schluessel_version, label
     )
 
 
-async def loesche_geheimnis(session_fabrik: SessionFabrik, nutzer: object, dienst: str) -> bool:
+async def loesche_geheimnis(
+    session_fabrik: SessionFabrik, nutzer: object, dienst: str, label: str = STANDARD_LABEL
+) -> bool:
     nutzer_id = getattr(nutzer, "nutzer_id", nutzer)
     async with db_sitzung(session_fabrik, nutzer_id) as session:
         ergebnis = await session.execute(
-            delete(UserSecret).where(UserSecret.user_id == nutzer_id, UserSecret.dienst == dienst)
+            delete(UserSecret).where(
+                UserSecret.user_id == nutzer_id,
+                UserSecret.dienst == dienst,
+                UserSecret.label == label,
+            )
         )
         await session.commit()
     return ergebnis.rowcount > 0
+
+
+async def labels_von(session_fabrik: SessionFabrik, nutzer: object, dienst: str) -> list[str]:
+    """Die Labels der eigenen Zugänge zu einem Dienst. Dafür wird nichts entschlüsselt."""
+    nutzer_id = getattr(nutzer, "nutzer_id", nutzer)
+    async with db_sitzung(session_fabrik, nutzer_id) as session:
+        return sorted(
+            await session.scalars(
+                select(UserSecret.label).where(
+                    UserSecret.user_id == nutzer_id, UserSecret.dienst == dienst
+                )
+            )
+        )
 
 
 async def verbundene_dienste(session_fabrik: SessionFabrik, nutzer: object) -> list[str]:
     """Nur die Namen der verbundenen Dienste, nie Werte."""
     nutzer_id = getattr(nutzer, "nutzer_id", nutzer)
     async with db_sitzung(session_fabrik, nutzer_id) as session:
-        return sorted(
-            await session.scalars(select(UserSecret.dienst).where(UserSecret.user_id == nutzer_id))
+        dienste = await session.scalars(
+            select(UserSecret.dienst).where(UserSecret.user_id == nutzer_id)
         )
+        return sorted(set(dienste))
 
 
 async def rotiere(session_fabrik: SessionFabrik, tresor: Tresor, nutzer_ids: list[int]) -> int:
@@ -182,9 +240,10 @@ async def rotiere(session_fabrik: SessionFabrik, tresor: Tresor, nutzer_ids: lis
                     eintrag.ciphertext,
                     eintrag.nonce,
                     eintrag.schluessel_version,
+                    eintrag.label,
                 )
                 eintrag.ciphertext, eintrag.nonce, eintrag.schluessel_version = (
-                    tresor.verschluessle(nutzer_id, eintrag.dienst, klartext)
+                    tresor.verschluessle(nutzer_id, eintrag.dienst, klartext, eintrag.label)
                 )
                 eintrag.aktualisiert_am = jetzt()
                 rotiert += 1
