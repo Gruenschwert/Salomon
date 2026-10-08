@@ -40,6 +40,10 @@ class EingehendeNachricht:
 class FreigabeAnfrage:
     approval_id: int
     vorschau_text: str
+    # Anzahl der Änderungen, über die der Nutzer mit einem Klick entscheidet
+    anzahl: int = 1
+    # Kurzfassung für lange, gleichförmige Vorschauen; die volle geht dann als Datei mit
+    kompakt_text: str | None = None
 
 
 @dataclass(frozen=True)

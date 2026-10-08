@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.channels.base import Antwort, FreigabeAnfrage
-from app.channels.telegram import FEHLER_TEXT, TELEGRAM_MAX_ZEICHEN, TelegramKanal
+from app.channels.telegram import (
+    FEHLER_TEXT,
+    TEIL_MAX_ZEICHEN,
+    TELEGRAM_MAX_ZEICHEN,
+    TelegramKanal,
+)
 from tests.beispiel_tools.schreibend import BeispielSchreiben
 from tests.conftest import ADMIN_ID, ERLAUBT_ID, FREMD_ID
 
@@ -138,8 +143,10 @@ async def test_lange_antwort_wird_aufgeteilt(
         teile.append(text)
 
     monkeypatch.setattr(type(kanal.application.bot), "send_message", send_message)
-    await kanal.sende_antwort(CHAT_ID, "a" * (TELEGRAM_MAX_ZEICHEN + 10))
-    assert [len(teil) for teil in teile] == [TELEGRAM_MAX_ZEICHEN, 10]
+    # Ein einzelnes Wort ohne jede Trennstelle wird als Notlösung hart geteilt.
+    await kanal.sende_antwort(CHAT_ID, "a" * (TEIL_MAX_ZEICHEN + 10))
+    assert [len(teil) for teil in teile] == [TEIL_MAX_ZEICHEN, 10]
+    assert TEIL_MAX_ZEICHEN < TELEGRAM_MAX_ZEICHEN
 
 
 @pytest.mark.parametrize(

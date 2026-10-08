@@ -6,7 +6,7 @@ import httpx2
 from sqlalchemy import select
 
 from app.agent.history import lade_verlauf
-from app.agent.loop import DIENST_FEHLER_TEXT, MAX_ITERATIONEN_TEXT
+from app.agent.loop import DIENST_FEHLER_TEXT
 from app.agent.prompts import ASANA_REGELN, SYSTEM_PROMPT, baue_system_prompt
 from app.channels.base import EingehendeNachricht
 from app.db.models import AuditLog
@@ -134,15 +134,34 @@ async def test_tool_fehler_fuehrt_nicht_zum_absturz(settings, session_fabrik, ba
     assert "geheimes" not in ergebnis["content"]
 
 
-async def test_schleife_bricht_bei_max_tool_iterations_ab(
-    settings, session_fabrik, baue_agent, user
+async def test_schleife_bricht_am_rundenlimit_mit_zwischenstand_ab(
+    settings, session_fabrik, baue_agent, user, caplog
 ):
-    client = FakeAnthropic(claude_antwort(tool_use_block("beispiel_lesen", {"text": "x"})))
+    client = FakeAnthropic(
+        claude_antwort(
+            text_block("Ich habe bisher 3 von 9 Projekten geprüft."),
+            tool_use_block("beispiel_lesen", {"text": "x"}),
+        )
+    )
     agent = baue_agent(client)
-    antwort = await agent.beantworte(nachricht("Endlos"), user)
-    assert antwort.text == MAX_ITERATIONEN_TEXT
-    assert len(client.aufrufe) == settings.max_tool_iterations
-    assert len(await _audit(session_fabrik)) == settings.max_tool_iterations
+    with caplog.at_level("WARNING"):
+        antwort = await agent.beantworte(nachricht("Endlos"), user)
+    assert antwort.text.splitlines() == [
+        "Ich habe nach 25 Runden aufgehört und bin mit der Aufgabe nicht fertig geworden "
+        "(25 Tool-Aufrufe, zuletzt beispiel_lesen).",
+        "Zwischenstand: Ich habe bisher 3 von 9 Projekten geprüft.",
+        "Es wurde nichts geändert.",
+        "Schreib „weiter“, dann mache ich an dieser Stelle weiter, oder grenze die Aufgabe ein.",
+    ]
+    assert settings.agent_max_rounds == 25
+    assert len(client.aufrufe) == 25
+    assert len(await _audit(session_fabrik)) == 25
+    assert "Rundenlimit erreicht: Runden=25, Tool-Aufrufe=25, letztes Tool=beispiel_lesen" in (
+        caplog.text
+    )
+    # Die Meldung steht im Verlauf, damit „weiter“ funktioniert.
+    verlauf = await lade_verlauf(session_fabrik, CHAT_ID, 20)
+    assert verlauf[-1]["content"].startswith("Ich habe nach 25 Runden aufgehört")
 
 
 async def test_schreibendes_tool_wird_nicht_ausgefuehrt(settings, session_fabrik, baue_agent, user):

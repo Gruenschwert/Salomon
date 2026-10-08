@@ -7,7 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -37,10 +37,16 @@ from app.medien import bild_medientyp as medientyp
 from app.observability.alerts import Alarme
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
 from app.observability.costs import Kosten, als_euro
+from app.observability.geheimnisse import maskiere, sammle_geheimnisse
 
 log = logging.getLogger(__name__)
 
 TELEGRAM_MAX_ZEICHEN = 4096
+# Teile bleiben deutlich unter dem Limit von Telegram, damit nie eine Nachricht scheitert.
+TEIL_MAX_ZEICHEN = 3800
+# Längere Texte gehen gekürzt in den Chat und vollständig als Datei.
+TEXT_MAX_ZEICHEN = 20000
+MAX_GRUND_ZEICHEN = 200
 KLICK_PRAEFIX = "freigabe"
 KLICK_JA = "ja"
 KLICK_NEIN = "nein"
@@ -98,6 +104,7 @@ class TelegramKanal:
         self._alarme = alarme
         self._beim_start = beim_start
         self._gestartet = time.monotonic()
+        self._geheimnisse = sammle_geheimnisse(settings)
         self._alben: dict[tuple[int, str], _Album] = {}
         self.album_wartezeit = ALBUM_WARTEZEIT_SEKUNDEN
         self.application = (
@@ -147,11 +154,32 @@ class TelegramKanal:
             await session.commit()
         return DateiHinweis(f"datei:{eintrag.id}", eintrag.name, eintrag.medientyp, groesse)
 
-    async def sende_antwort(self, chat_id: int, text: str) -> None:
+    async def sende_text(self, chat_id: int, text: str) -> None:
+        """Zentrale Sendefunktion: teilt lange Texte an Zeilenenden und sendet die Teile der
+        Reihe nach. Erst ab TEXT_MAX_ZEICHEN wird gekürzt; der ganze Text kommt dann als Datei."""
+        if len(text) > TEXT_MAX_ZEICHEN:
+            anfang = teile_text(text)[0]
+            await self.application.bot.send_message(chat_id=chat_id, text=anfang)
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Der Text ist {len(text)} Zeichen lang und damit zu lang für den Chat. "
+                "Oben steht der Anfang, der ganze Text ist in der Datei.",
+            )
+            await self.sende_datei(chat_id, "text.txt", text)
+            return
         for teil in teile_text(text):
             await self.application.bot.send_message(chat_id=chat_id, text=teil)
 
+    async def sende_datei(self, chat_id: int, name: str, text: str) -> None:
+        await self.application.bot.send_document(
+            chat_id=chat_id, document=InputFile(text.encode("utf-8"), filename=name)
+        )
+
+    async def sende_antwort(self, chat_id: int, text: str) -> None:
+        await self.sende_text(chat_id, text)
+
     async def sende_freigabe_anfrage(self, chat_id: int, anfrage: FreigabeAnfrage) -> None:
+        """Vorschau in beliebiger Länge; die Buttons hängen an einer kurzen letzten Nachricht."""
         kennung = f"{KLICK_PRAEFIX}:{anfrage.approval_id}"
         buttons = InlineKeyboardMarkup(
             [
@@ -161,12 +189,16 @@ class TelegramKanal:
                 ]
             ]
         )
-        # Lange Vorschauen gehen über mehrere Nachrichten; die Buttons hängen an der letzten.
-        teile = teile_text(f"Freigabe erforderlich (gültig 15 Minuten):\n{anfrage.vorschau_text}")
-        for teil in teile[:-1]:
-            await self.application.bot.send_message(chat_id=chat_id, text=teil)
+        if anfrage.kompakt_text:
+            await self.sende_text(chat_id, f"Freigabe erforderlich:\n{anfrage.kompakt_text}")
+            await self.sende_datei(
+                chat_id, f"aenderungssatz_{anfrage.approval_id}.txt", anfrage.vorschau_text
+            )
+        else:
+            await self.sende_text(chat_id, f"Freigabe erforderlich:\n{anfrage.vorschau_text}")
+        wort = "1 Änderung" if anfrage.anzahl == 1 else f"{anfrage.anzahl} Änderungen"
         await self.application.bot.send_message(
-            chat_id=chat_id, text=teile[-1], reply_markup=buttons
+            chat_id=chat_id, text=f"Freigabe für {wort}, gültig 15 Minuten", reply_markup=buttons
         )
 
     async def sende_loesch_rueckfrage(self, chat_id: int, approval_id: int, text: str) -> None:
@@ -182,11 +214,11 @@ class TelegramKanal:
                 ]
             ]
         )
-        teile = teile_text(text)
-        for teil in teile[:-1]:
-            await self.application.bot.send_message(chat_id=chat_id, text=teil)
+        await self.sende_text(chat_id, text)
         await self.application.bot.send_message(
-            chat_id=chat_id, text=teile[-1], reply_markup=buttons
+            chat_id=chat_id,
+            text="Löschen bestätigen? Gültig bis 15 Minuten nach der Vorschau.",
+            reply_markup=buttons,
         )
 
     async def verarbeite(self, nachricht: EingehendeNachricht) -> Antwort | None:
@@ -255,7 +287,32 @@ class TelegramKanal:
             # sonst wörtlich erscheinen. Vorschauen bleiben unangetastet.
             await self.sende_antwort(chat_id, ohne_markdown(antwort.text))
             for anfrage in antwort.freigaben:
-                await self.sende_freigabe_anfrage(chat_id, anfrage)
+                await self._sende_freigabe_oder_verwirf(chat_id, anfrage)
+
+    async def _sende_freigabe_oder_verwirf(self, chat_id: int, anfrage: FreigabeAnfrage) -> None:
+        """Kommt die Freigabe nicht beim Nutzer an, wird sie sofort verworfen und er erfährt es.
+
+        Ohne sichtbare Buttons darf kein Änderungssatz offen bleiben.
+        """
+        try:
+            await self.sende_freigabe_anfrage(chat_id, anfrage)
+            return
+        except Exception as exc:
+            grund = maskiere(f"{type(exc).__name__}: {exc}", self._geheimnisse)[:MAX_GRUND_ZEICHEN]
+            log.exception(
+                "Freigabe #%s konnte nicht gesendet werden (%s Änderungen, Vorschau %s Zeichen)",
+                anfrage.approval_id,
+                anfrage.anzahl,
+                len(anfrage.vorschau_text),
+            )
+        user_id = await self._freigaben.verwerfen(anfrage.approval_id, grund)
+        text = f"Die Freigabe konnte nicht gesendet werden: {grund}. Es wurde nichts geändert."
+        if user_id is not None:
+            await speichere_hinweis(self._session_fabrik, chat_id, user_id, text)
+        await self.sende_antwort(chat_id, text)
+        await self._alarme.melde(
+            f"⚠️ Freigabe #{anfrage.approval_id} war nicht zustellbar und wurde verworfen."
+        )
 
     async def _bei_foto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Fotos und Dokumente; beides kann der Nutzer lesen lassen oder an Asana anhängen."""
@@ -445,9 +502,20 @@ class TelegramKanal:
             log.warning("Klick konnte nicht quittiert werden: %s", type(exc).__name__)
         if entscheidung.rueckfrage:
             if update.effective_chat is not None:
-                await self.sende_loesch_rueckfrage(
-                    update.effective_chat.id, int(approval_id), entscheidung.text
-                )
+                try:
+                    await self.sende_loesch_rueckfrage(
+                        update.effective_chat.id, int(approval_id), entscheidung.text
+                    )
+                except Exception as exc:
+                    # Ohne sichtbare Rückfrage darf die Freigabe nicht offen bleiben.
+                    grund = maskiere(f"{type(exc).__name__}: {exc}", self._geheimnisse)
+                    log.exception("Lösch-Rückfrage #%s konnte nicht gesendet werden", approval_id)
+                    await self._freigaben.verwerfen(int(approval_id), grund[:MAX_GRUND_ZEICHEN])
+                    await self.sende_antwort(
+                        update.effective_chat.id,
+                        "Die Rückfrage zum Löschen konnte nicht gesendet werden: "
+                        f"{grund[:MAX_GRUND_ZEICHEN]}. Es wurde nichts geändert.",
+                    )
             return
         if update.effective_chat is not None:
             if entscheidung.im_verlauf and entscheidung.user_id is not None:
@@ -486,18 +554,55 @@ def ohne_markdown(text: str) -> str:
     return text
 
 
-def teile_text(text: str, maximum: int = TELEGRAM_MAX_ZEICHEN) -> list[str]:
-    """Teilt einen Text in Telegram-Nachrichten, möglichst an Zeilenenden."""
-    teile = []
-    while len(text) > maximum:
-        schnitt = text.rfind("\n", 0, maximum + 1)
-        if schnitt <= 0:
-            schnitt = maximum
-        teile.append(text[:schnitt])
-        text = text[schnitt:].removeprefix("\n")
-    if text:
-        teile.append(text)
+def teile_text(text: str, maximum: int = TEIL_MAX_ZEICHEN) -> list[str]:
+    """Teilt einen Text in Nachrichten von höchstens `maximum` Zeichen.
+
+    Getrennt wird nur an Zeilenumbrüchen. Eine einzelne Zeile, die allein zu lang ist, wird an
+    Leerzeichen getrennt, damit kein Wort und keine URL zerrissen wird; erst ein einzelnes
+    Wort über `maximum` Zeichen wird hart geteilt.
+    """
+    teile: list[str] = []
+    zeilen: list[str] = []
+    laenge = 0
+
+    def abschliessen() -> None:
+        nonlocal zeilen, laenge
+        teil = "\n".join(zeilen).strip("\n")
+        if teil.strip():
+            teile.append(teil)
+        zeilen, laenge = [], 0
+
+    for zeile in text.split("\n"):
+        for stueck in _teile_zeile(zeile, maximum):
+            if zeilen and laenge + 1 + len(stueck) > maximum:
+                abschliessen()
+            zeilen.append(stueck)
+            laenge += len(stueck) + (1 if len(zeilen) > 1 else 0)
+    abschliessen()
     return teile
+
+
+def _teile_zeile(zeile: str, maximum: int) -> list[str]:
+    """Eine Zeile, die allein in keine Nachricht passt, an Leerzeichen in Stücke teilen."""
+    if len(zeile) <= maximum:
+        return [zeile]
+    stuecke: list[str] = []
+    aktuell = ""
+    for wort in zeile.split(" "):
+        while len(wort) > maximum:
+            if aktuell:
+                stuecke.append(aktuell)
+                aktuell = ""
+            stuecke.append(wort[:maximum])
+            wort = wort[maximum:]
+        if aktuell and len(aktuell) + 1 + len(wort) > maximum:
+            stuecke.append(aktuell)
+            aktuell = wort
+        else:
+            aktuell = f"{aktuell} {wort}" if aktuell else wort
+    if aktuell:
+        stuecke.append(aktuell)
+    return stuecke
 
 
 def _als_dauer(sekunden: float) -> str:

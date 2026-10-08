@@ -110,7 +110,8 @@ Ist das Tageslimit (`DAILY_COST_LIMIT_EUR`, gilt für alle Nutzer zusammen) erre
 | `ASANA_API_AUFRUF_ENABLED` | true | `false` schaltet den allgemeinen API-Aufruf ganz ab |
 | `ASANA_API_AUFRUF_ROLES` | admin | Rollen, die den allgemeinen API-Aufruf nutzen dürfen |
 | `ASANA_TEAM_VERWALTUNG_ROLES` | admin | Rollen, die Teams anlegen, ändern und Mitglieder verwalten dürfen |
-| `MAX_OUTPUT_TOKENS` | 8000 | Ein Änderungssatz ist Claudes Ausgabe. Bei kleineren Werten passen große Pläne nicht in einen Satz |
+| `MAX_OUTPUT_TOKENS` | 8000 | Ein Änderungssatz ist Claudes Ausgabe. Bei kleineren Werten passen große Pläne nicht in einen Satz. Unter 4000 warnt der Bot beim Start |
+| `AGENT_MAX_ROUNDS` | 25 | Höchstzahl der Runden je Nachricht. Danach meldet der Bot den Zwischenstand; mit „weiter“ geht es dort weiter |
 
 ### So läuft eine Änderung ab
 
@@ -119,6 +120,10 @@ Ist das Tageslimit (`DAILY_COST_LIMIT_EUR`, gilt für alle Nutzer zusammen) erre
 3. ✅ führt den Satz der Reihe nach aus, ❌ verwirft ihn. Die Freigabe gilt 15 Minuten und nur für den Nutzer, der gefragt hat.
 4. Enthält der Satz Löschungen, kommt nach ✅ die Rückfrage „Wirklich löschen? N Objekte“ mit den Buttons „🗑 Ja, löschen“ und „Abbrechen“. Bis zu dieser zweiten Bestätigung läuft **keine** Operation des Satzes, auch keine harmlose.
 5. Danach meldet der Bot das Ergebnis mit Link. Scheitert eine Operation, hört der Satz dort auf. Die Meldung nennt, was erledigt ist, was fehlgeschlagen ist und was nicht mehr lief. Es wird nichts wiederholt und nichts zurückgerollt.
+
+Sammelaufgaben („hake alle überfälligen ab“): Der Bot zählt zuerst mit einer einzigen Abfrage, nennt dir Anzahl und Stichtag und schlägt dann einen Änderungssatz vor. Ab mehr als 15 gleichartigen Operationen ist die Vorschau gruppiert („57 mal Aufgabe erledigen“), zeigt die ersten 10 Zeilen und bringt die vollständige Liste als `.txt`-Datei mit. Über 100 Operationen teilt er in Pakete.
+
+Lange Texte teilt der Bot an Zeilenenden in mehrere Nachrichten. Erst über 20.000 Zeichen kommt nur der Anfang in den Chat und der ganze Text als Datei. Die Buttons einer Freigabe hängen immer an einer kurzen letzten Nachricht („Freigabe für N Änderungen, gültig 15 Minuten“). Kommt eine Freigabe nicht bei dir an, wird sie sofort verworfen und der Bot sagt dir, warum; es bleibt nichts offen, was später laufen könnte.
 
 Termine gibt es in drei Formen: nur Fälligkeit (mit oder ohne Uhrzeit), ganze Tage von–bis und Zeitfenster mit Start- und Endzeit. Start ohne Uhrzeit und Fälligkeit mit Uhrzeit lassen sich in Asana nicht mischen; die Vorschau lehnt das ab, bevor etwas freigegeben wird. Wird an einer Aufgabe nur Start oder nur Ende geändert, übernimmt der Bot den anderen Wert aus dem aktuellen Stand. Uhrzeiten gelten als Ortszeit Europe/Berlin und gehen in UTC an Asana.
 
@@ -223,6 +228,7 @@ Alle wurden vor der Umsetzung abgestimmt:
 - Zusätzliche Variablen `PRICE_INPUT_USD_PER_MTOK`, `PRICE_OUTPUT_USD_PER_MTOK`, `USD_EUR_RATE` für die Kostenrechnung in Euro.
 - Zusätzliche Tabelle `notizen` für `demo_notiz`.
 - `MAX_OUTPUT_TOKENS` steht standardmäßig auf 8000 statt 1500, damit ein großer Asana-Änderungssatz in eine Antwort passt.
+- `MAX_TOOL_ITERATIONS` (8) ist durch `AGENT_MAX_ROUNDS` (25) ersetzt; die alte Variable wird ignoriert.
 
 Festlegungen zu ASANA_TOOL.md, wo das Dokument offen war (ebenfalls abgestimmt):
 
@@ -246,7 +252,8 @@ Festlegungen zu ASANA_TOOL_ERWEITERUNG.md:
 - Die Vorschau zeigt den Stand zum Zeitpunkt des Vorschlags. Ändert jemand in den bis zu 15 Minuten bis zum Klick etwas in Asana, gilt beim Ausführen der dann aktuelle Stand; die Vorher-Werte im Audit-Log stammen vom Zeitpunkt der Ausführung.
 - Die Aufgabensuche über den ganzen Workspace gibt es bei Asana nur in bezahlten Tarifen. Ohne sie sucht der Bot je Projekt oder je Zuständigem und sagt das, wenn eine Angabe fehlt.
 - Dokumente aus dem Chat kann der Bot anhängen, aber nicht lesen; lesen kann er Fotos im Chat sowie Bilder und PDFs, die schon in Asana hängen.
-- Die Aufgabensuche fragt je Treffer die Zahl der Anhänge ab. Das sind bis zu 30 zusätzliche Aufrufe je Suche und zählt gegen das Abfragelimit von Asana.
+- Die Aufgabensuche liefert standardmäßig kompakte Zeilen für bis zu 300 Aufgaben. Die Zahl der Anhänge je Treffer gibt es nur in der ausführlichen Ansicht (höchstens 30 Aufgaben); das sind dann bis zu 30 zusätzliche Aufrufe.
+- Ohne die Workspace-Suche von Asana (nicht in jedem Tarif) geht der Bot für „alle überfälligen“ selbst alle aktiven Projekte durch. Das dauert bei vielen Projekten entsprechend länger.
 - Beim Duplizieren eines Projekts lässt sich kein Team angeben: Die API-Referenz kennt dafür kein Feld, die Kopie landet im Team des Originals.
 - Die Wiederholungsregel ist in der Asana-Doku nicht beschrieben. Lesen und Übertragen sind deshalb ungeprüft, bis du sie einmal live ausprobiert hast.
 - Portfolios zeigt Asana über einen persönlichen Token nur an, wenn sie dem Token-Inhaber gehören.

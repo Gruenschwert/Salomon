@@ -31,6 +31,8 @@ class Tool(Protocol):
 
     def ergebnis_text(self, ergebnis: dict) -> str | None: ...
 
+    def vorschau_darstellung(self, vorschau_text: str, params: dict) -> tuple[int, str | None]: ...
+
     def zweite_bestaetigung(self, vorschau_text: str, **params) -> str | None: ...
 
 
@@ -98,6 +100,8 @@ class BasisTool:
     beschreibung: ClassVar[str]
     parameter_schema: ClassVar[dict]
     schreibend: ClassVar[bool] = False
+    # Obergrenze des Ergebnistexts für Claude; None = Standard der Registry
+    max_ergebnis_zeichen: ClassVar[int | None] = None
     # True: Das Ergebnis der Freigabe wird in den Gesprächsverlauf geschrieben.
     ergebnis_im_verlauf: ClassVar[bool] = False
     erlaubte_rollen: ClassVar[set[str]] = {"admin", "user"}
@@ -124,6 +128,10 @@ class BasisTool:
     def ergebnis_text(self, ergebnis: dict) -> str | None:
         """Eigene Meldung an den Nutzer nach der Ausführung; None = Standardtext."""
         return None
+
+    def vorschau_darstellung(self, vorschau_text: str, params: dict) -> tuple[int, str | None]:
+        """Anzahl der Änderungen und, bei langen gleichförmigen Vorschauen, eine Kurzfassung."""
+        return 1, None
 
     def zweite_bestaetigung(self, vorschau_text: str, **params) -> str | None:
         """Text einer zweiten Rückfrage nach dem ersten ✅; None = keine nötig."""

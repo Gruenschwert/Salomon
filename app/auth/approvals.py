@@ -34,6 +34,9 @@ STATUS_FREMDER_NUTZER = "fremder_nutzer"
 STATUS_BEREITS_ENTSCHIEDEN = "bereits_entschieden"
 
 MAX_KURZTEXT_ZEICHEN = 200
+# So viele und so alte Freigaben nennt `stand` höchstens.
+STAND_ANZAHL = 3
+STAND_FENSTER = timedelta(hours=2)
 
 
 @dataclass(frozen=True)
@@ -78,7 +81,74 @@ class Freigaben:
             parameter=params,
             ergebnis_kurz=f"Freigabe #{approval.id} angefragt",
         )
-        return FreigabeAnfrage(approval_id=approval.id, vorschau_text=vorschau)
+        anzahl, kompakt = tool.vorschau_darstellung(vorschau, params)
+        return FreigabeAnfrage(
+            approval_id=approval.id, vorschau_text=vorschau, anzahl=anzahl, kompakt_text=kompakt
+        )
+
+    async def verwerfen(self, approval_id: int, grund: str) -> int | None:
+        """Verwirft eine Freigabe, die den Nutzer nicht erreicht hat. Liefert dessen User-ID.
+
+        Ohne sichtbare Buttons darf nichts offen bleiben, was später ausgeführt werden könnte.
+        """
+        async with self._session_fabrik() as session:
+            approval = await session.get(Approval, approval_id)
+            if approval is None:
+                return None
+            await session.execute(
+                update(Approval)
+                .where(
+                    Approval.id == approval_id,
+                    Approval.status.in_([STATUS_OFFEN, STATUS_BESTAETIGUNG]),
+                )
+                .values(status=STATUS_ABGELEHNT, entschieden_am=jetzt())
+            )
+            await session.commit()
+        await protokolliere(
+            self._session_fabrik,
+            user_id=approval.user_id,
+            tool_name=approval.tool_name,
+            parameter={"freigabe": approval_id},
+            ergebnis_kurz=f"Freigabe #{approval_id} verworfen",
+            fehler=f"nicht zustellbar: {grund}",
+        )
+        return approval.user_id
+
+    async def stand(self, user_id: int, zeitpunkt: datetime | None = None) -> str:
+        """Kurzer Stand der letzten Freigaben eines Nutzers für den System-Prompt.
+
+        So weiß Claude bei „mach das“, ob etwas offen, verworfen, abgelaufen oder erledigt ist.
+        """
+        zeitpunkt = zeitpunkt or jetzt()
+        async with self._session_fabrik() as session:
+            letzte = list(
+                await session.scalars(
+                    select(Approval)
+                    .where(Approval.user_id == user_id)
+                    .order_by(Approval.id.desc())
+                    .limit(STAND_ANZAHL)
+                )
+            )
+        zeilen = []
+        for approval in letzte:
+            alter = zeitpunkt - approval.erstellt_am
+            if alter > STAND_FENSTER:
+                continue
+            status = approval.status
+            if status in (STATUS_OFFEN, STATUS_BESTAETIGUNG) and alter > FREIGABE_GUELTIGKEIT:
+                status = "abgelaufen, nichts wurde ausgeführt"
+            elif status == STATUS_OFFEN:
+                status = "wartet auf ✅ oder ❌ des Nutzers"
+            elif status == STATUS_BESTAETIGUNG:
+                status = "wartet auf die zweite Bestätigung zum Löschen"
+            elif status == STATUS_ABGELEHNT:
+                status = "verworfen, nichts wurde ausgeführt"
+            elif status == STATUS_GENEHMIGT:
+                status = "freigegeben und gelaufen (Ergebnis steht im Verlauf)"
+            minuten = max(0, int(alter.total_seconds() // 60))
+            kurz = _kurztext(approval.vorschau_text)
+            zeilen.append(f"- #{approval.id} vor {minuten} min: {kurz} – {status}")
+        return "\n".join(zeilen)
 
     async def entscheiden(
         self,

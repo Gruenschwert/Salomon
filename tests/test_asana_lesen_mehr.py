@@ -384,7 +384,7 @@ async def test_suche_liefert_felder_und_anzahl_der_anhaenge(akontext, fake):
             200, json={"data": [{"gid": "a"}] if anfrage.url.params["parent"] == "7" else []}
         ),
     )
-    ergebnis = await AsanaAufgabenSuchen(akontext).ausfuehren(projekt_gid="100")
+    ergebnis = await AsanaAufgabenSuchen(akontext).ausfuehren(projekt_gid="100", details=True)
     erste, zweite = ergebnis["eintraege"]
     assert (erste["anhaenge"], zweite["anhaenge"]) == (1, 0)
     assert erste["felder"] == {"Priorität": "Hoch"}
@@ -399,8 +399,8 @@ async def test_lehnt_asana_das_wiederholungsfeld_ab_geht_es_ohne_weiter(akontext
 
     fake.route("GET", "/workspaces/ws1/tasks/search", antwort)
     tool = AsanaAufgabenSuchen(akontext)
-    assert (await tool.ausfuehren(projekt_gid="100"))["anzahl"] == 1
-    assert (await tool.ausfuehren(projekt_gid="100"))["anzahl"] == 1
+    assert (await tool.ausfuehren(projekt_gid="100", details=True))["anzahl"] == 1
+    assert (await tool.ausfuehren(projekt_gid="100", details=True))["anzahl"] == 1
     suchen = [a for a in fake.anfragen if a.url.path.endswith("/tasks/search")]
     # Erst mit, dann ohne das Feld; beim zweiten Aufruf wird es gar nicht mehr angefragt.
     assert ["recurrence" in a.url.params["opt_fields"] for a in suchen] == [True, False, False]

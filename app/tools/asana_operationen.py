@@ -302,13 +302,62 @@ def pruefe_operationen(operationen: object) -> list[dict]:
         raise ToolFehler("Der Änderungssatz enthält keine Operationen.")
     geprueft: list[dict] = []
     bekannt: dict[str, str] = {}
-    for nummer, roh in enumerate(operationen, start=1):
+    for nummer, roh in enumerate(_entfalte(operationen), start=1):
         try:
             op = _pruefe_operation(roh, bekannt)
         except ToolFehler as exc:
             raise ToolFehler(f"Operation {nummer}: {exc}") from None
         geprueft.append(op)
     return geprueft
+
+
+# Sammelform: Eine Operation mit „gids“ steht für dieselbe Operation an jeder dieser GIDs.
+# Das hält Claudes Ausgabe bei vielen gleichartigen Änderungen kurz.
+MEHRFACH_FELDER = {"gids": "gid", "aufgabe_gids": "aufgabe_gid"}
+
+
+def _entfalte(operationen: list) -> list:
+    """Macht aus Operationen in Sammelform je eine Operation pro GID."""
+    einzeln: list = []
+    for roh in operationen:
+        mehrfach = (
+            [feld for feld in MEHRFACH_FELDER if feld in roh] if isinstance(roh, dict) else []
+        )
+        if not mehrfach:
+            einzeln.append(roh)
+            continue
+        feld = mehrfach[0]
+        ziel = MEHRFACH_FELDER[feld]
+        werte = roh[feld]
+        if len(mehrfach) > 1 or ziel in roh or roh.get("platzhalter"):
+            raise ToolFehler(
+                f"„{feld}“ lässt sich nicht mit „{ziel}“, „platzhalter“ oder einer zweiten "
+                "Sammelliste kombinieren."
+            )
+        if (
+            not isinstance(werte, list)
+            or not werte
+            or not all(isinstance(w, str | int) and not isinstance(w, bool) for w in werte)
+        ):
+            raise ToolFehler(f"„{feld}“ muss eine nicht leere Liste von GIDs sein.")
+        rest = {k: v for k, v in roh.items() if k != feld}
+        einzeln.extend({**rest, ziel: str(wert).strip()} for wert in werte)
+    return einzeln
+
+
+def bezeichnung(art: str) -> str:
+    """Lesbarer Name einer Operation, z. B. „Aufgabe erledigen“."""
+    text = art.replace("_", " ")
+    for ascii_form, umlaut in (
+        ("aendern", "ändern"),
+        ("loeschen", "löschen"),
+        ("hinzufuegen", "hinzufügen"),
+        ("verknuepfen", "verknüpfen"),
+        ("umhaengen", "umhängen"),
+        ("gefaellt", "gefällt"),
+    ):
+        text = text.replace(ascii_form, umlaut)
+    return text[:1].upper() + text[1:]
 
 
 def _pruefe_operation(roh: object, bekannt: dict[str, str]) -> dict:

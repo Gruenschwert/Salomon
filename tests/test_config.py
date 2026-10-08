@@ -48,7 +48,7 @@ def test_secrets_erscheinen_nicht_in_repr(monkeypatch):
 def test_standardwerte(monkeypatch):
     _setze(monkeypatch)
     settings = Settings(_env_file=None)
-    assert settings.max_tool_iterations == 8
+    assert settings.agent_max_rounds == 25
     assert settings.history_max_messages == 20
     assert settings.tz == "Europe/Berlin"
 

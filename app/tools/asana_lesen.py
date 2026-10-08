@@ -1,7 +1,9 @@
 """Asana-Lese-Tools (laufen ohne Freigabe)."""
 
 import asyncio
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.tools.asana_client import (
     MAX_EINTRAEGE,
@@ -35,6 +37,34 @@ _AUFGABEN_FELDER = (
 # Die Wiederholungsregel ist in der Asana-Doku nicht beschrieben. Lehnt Asana das Feld ab,
 # wird es für den Rest der Laufzeit nicht mehr angefragt.
 WIEDERHOLUNG_FELD = "recurrence"
+# Für die kompakte Sammelansicht reichen wenige Felder.
+_KOMPAKT_FELDER = (
+    "name",
+    "completed",
+    "due_on",
+    "assignee.name",
+    "memberships.project.name",
+    "memberships.section.name",
+)
+# Obergrenze der Sammelabfrage
+MAX_SAMMEL = 300
+SUCH_SEITE = 100
+MAX_PROJEKTE_JE_SUCHE = 200
+MAX_NAME_ZEICHEN = 60
+MAX_PROJEKTNAME_ZEICHEN = 30
+
+
+@dataclass(frozen=True)
+class _Filter:
+    text: str
+    projekt: str
+    abschnitt: str
+    zustaendig: str
+    von: date | None
+    bis: date | None
+    offen: bool
+
+
 MAX_ANHAENGE_GEZAEHLT = 100
 GLEICHZEITIGE_ZAEHLUNGEN = 5
 
@@ -117,35 +147,53 @@ class AsanaProjekteSuchen(AsanaLeseTool):
 class AsanaAufgabenSuchen(AsanaLeseTool):
     name = "asana_aufgaben_suchen"
     beschreibung = (
-        "Sucht Asana-Aufgaben. Filter: Text im Namen, Projekt, Zuständiger, Fälligkeit von/bis. "
-        "Für „meine Aufgaben“ zustaendig_gid=me. Mindestens ein Filter ist nötig. Rückgabe je "
-        "Aufgabe: GID, Name, Fälligkeit, Zuständiger, Abschnitt, Projekt, erledigt, dazu die "
-        "Werte benutzerdefinierter Felder, die Anzahl der Anhänge und eine Wiederholungsregel, "
-        "falls vorhanden. Höchstens 30 Treffer."
+        "Sucht Asana-Aufgaben über den ganzen Workspace oder eingegrenzt und holt dabei alle "
+        "Seiten selbst (bis 300 Aufgaben). Filter: text, projekt, abschnitt, zustaendig (GID "
+        "oder „ich“), faellig_von, faellig_bis (beide einschließlich), ueberfaellig (fällig vor "
+        "heute und offen), nur_offen. Mindestens ein Filter ist nötig. Für Sammelaufgaben wie "
+        "„alle überfälligen“ genügt EIN Aufruf mit ueberfaellig=true; frage nicht Projekt für "
+        "Projekt ab. Rückgabe: gesamt (Anzahl der Treffer) und je Aufgabe eine kompakte Zeile "
+        "„gid | fällig | projekt | name“. Mit details=true stattdessen höchstens 30 Aufgaben "
+        "mit Zuständigem, Abschnitt, benutzerdefinierten Feldern, Anzahl der Anhänge und "
+        "Wiederholungsregel."
     )
     parameter_schema = {
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "Text im Aufgabennamen"},
-            "projekt_gid": {"type": "string", "description": "GID des Projekts"},
-            "zustaendig_gid": {
+            "projekt": {"type": "string", "description": "GID des Projekts"},
+            "abschnitt": {"type": "string", "description": "GID des Abschnitts"},
+            "zustaendig": {
                 "type": "string",
-                "description": "GID des Zuständigen oder „me“ für den Inhaber des Asana-Tokens",
+                "description": "GID des Zuständigen oder „ich“ für den Inhaber des Asana-Tokens",
             },
             "faellig_von": {"type": "string", "description": "Fällig ab, JJJJ-MM-TT (einschl.)"},
-            "faellig_bis": {"type": "string", "description": "Fällig bis, JJJJ-MM-TT (einschl.)"},
-            "nur_offene": {
+            "faellig_bis": {
+                "type": "string",
+                "description": "Stichtag: fällig am oder vor diesem Tag, JJJJ-MM-TT",
+            },
+            "ueberfaellig": {
+                "type": "boolean",
+                "description": "Nur offene Aufgaben, die vor heute fällig waren",
+            },
+            "nur_offen": {
                 "type": "boolean",
                 "description": "Nur nicht erledigte Aufgaben (Standard: true)",
+            },
+            "details": {
+                "type": "boolean",
+                "description": "Ausführliche Angaben statt kompakter Zeilen (höchstens 30)",
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": MAX_EINTRAEGE,
-                "description": "Maximale Anzahl (Standard und Höchstwert: 30)",
+                "maximum": MAX_SAMMEL,
+                "description": "Maximale Anzahl (Standard: 300, mit details 30)",
             },
         },
     }
+    # 300 kompakte Zeilen brauchen mehr Platz als das übliche Ergebnis.
+    max_ergebnis_zeichen = 40000
 
     def __init__(self, kontext: ToolKontext) -> None:
         super().__init__(kontext)
@@ -153,54 +201,92 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
         # nicht mehr versucht.
         self._suche_verfuegbar = True
 
+    def _heute(self) -> date:
+        return datetime.now(ZoneInfo(self.kontext.settings.tz)).date()
+
     async def ausfuehren(
         self,
         text: str = "",
-        projekt_gid: str = "",
-        zustaendig_gid: str = "",
+        projekt: str = "",
+        abschnitt: str = "",
+        zustaendig: str = "",
         faellig_von: str = "",
         faellig_bis: str = "",
-        nur_offene: bool = True,
-        limit: int = MAX_EINTRAEGE,
+        ueberfaellig: bool = False,
+        nur_offen: bool | None = None,
+        details: bool = False,
+        limit: int | None = None,
+        # Frühere Namen der Parameter bleiben gültig.
+        projekt_gid: str = "",
+        zustaendig_gid: str = "",
+        nur_offene: bool | None = None,
     ) -> dict:
         text = (text or "").strip()
-        projekt_gid = pruefe_gid(projekt_gid, "projekt_gid") if projekt_gid else ""
-        if zustaendig_gid and zustaendig_gid != ICH:
-            zustaendig_gid = pruefe_gid(zustaendig_gid, "zustaendig_gid")
+        projekt = projekt or projekt_gid
+        projekt = pruefe_gid(projekt, "projekt") if projekt else ""
+        abschnitt = pruefe_gid(abschnitt, "abschnitt") if abschnitt else ""
+        zustaendig = str(zustaendig or zustaendig_gid).strip()
+        if zustaendig.casefold() in ("ich", ICH):
+            zustaendig = ICH
+        elif zustaendig:
+            zustaendig = pruefe_gid(zustaendig, "zustaendig")
+        offen = next((w for w in (nur_offen, nur_offene) if w is not None), True)
         von = _datum(faellig_von, "faellig_von")
         bis = _datum(faellig_bis, "faellig_bis")
-        limit = max(1, min(int(limit), MAX_EINTRAEGE))
-        if not (text or projekt_gid or zustaendig_gid or von or bis):
+        if ueberfaellig:
+            gestern = self._heute() - timedelta(days=1)
+            bis = min(bis, gestern) if bis else gestern
+            offen = True
+        maximum = MAX_EINTRAEGE if details else MAX_SAMMEL
+        limit = max(1, min(int(limit or maximum), maximum))
+        if not (text or projekt or abschnitt or zustaendig or von or bis):
             raise ToolFehler("Bitte mindestens einen Filter angeben.")
+        filter_ = _Filter(text, projekt, abschnitt, zustaendig, von, bis, offen)
+        felder = _AUFGABEN_FELDER if details else _KOMPAKT_FELDER
 
         async with self.asana as asana:
-            aufgaben = weitere = None
+            aufgaben = None
             if self._suche_verfuegbar:
                 try:
-                    aufgaben, weitere = await self._ueber_suche(
-                        asana, text, projekt_gid, zustaendig_gid, von, bis, nur_offene
-                    )
+                    aufgaben, weitere = await self._ueber_suche(asana, filter_, felder, details)
                 except AsanaFehler as exc:
                     if exc.status != 402:
                         raise
                     self._suche_verfuegbar = False
             if aufgaben is None:
-                aufgaben, weitere = await self._ueber_liste(
-                    asana, projekt_gid, zustaendig_gid, nur_offene
-                )
+                aufgaben, weitere = await self._ueber_listen(asana, filter_, felder, details)
 
-        # Beide Wege werden hier noch einmal gefiltert: Die Liste kennt die Filter gar nicht,
+        # Alle Wege werden hier noch einmal gefiltert: Die Listen kennen die Filter gar nicht,
         # und die Suche wird bewusst etwas zu weit gefasst abgefragt.
-        treffer = [
-            _aufgabe_kurz(a)
+        gefiltert = [
+            a
             for a in aufgaben
             if _passt(text, a.get("name"))
-            and not (nur_offene and a.get("completed"))
+            and not (offen and a.get("completed"))
             and _im_zeitraum(a.get("due_on"), von, bis)
+            and (not abschnitt or abschnitt in _abschnitt_gids(a))
         ]
-        treffer.sort(key=lambda a: (a["faellig"] is None, a["faellig"] or ""))
-        ergebnis = begrenze(treffer, weitere, maximum=limit)
-        await self._ergaenze_anhaenge(ergebnis["eintraege"])
+        gefiltert.sort(key=lambda a: (a.get("due_on") is None, a.get("due_on") or ""))
+        if details:
+            ergebnis = begrenze([_aufgabe_kurz(a) for a in gefiltert], weitere, maximum=limit)
+            ergebnis["gesamt"] = len(gefiltert)
+            await self._ergaenze_anhaenge(ergebnis["eintraege"])
+            return ergebnis
+        ergebnis = {
+            "gesamt": len(gefiltert),
+            "angezeigt": min(len(gefiltert), limit),
+            "spalten": "gid | fällig | projekt | name",
+            "aufgaben": [_aufgabe_zeile(a) for a in gefiltert[:limit]],
+        }
+        if bis:
+            ergebnis["stichtag"] = f"fällig am oder vor dem {bis:%d.%m.%Y}"
+        if weitere:
+            ergebnis["hinweis"] = (
+                f"Es wurden nicht alle Aufgaben geladen (Obergrenze {MAX_SAMMEL}); die Zahl in "
+                "„gesamt“ ist deshalb eine Untergrenze. Bitte enger filtern."
+            )
+        elif len(gefiltert) > limit:
+            ergebnis["hinweis"] = f"Angezeigt werden die ersten {limit}."
         return ergebnis
 
     async def _ergaenze_anhaenge(self, aufgaben: list[dict]) -> None:
@@ -215,54 +301,89 @@ class AsanaAufgabenSuchen(AsanaLeseTool):
         async with self.asana:
             await asyncio.gather(*(zaehle(aufgabe) for aufgabe in aufgaben))
 
+    async def _lade(self, abruf, felder: tuple[str, ...], details: bool):
+        """Die Wiederholungsregel wird nur für die ausführliche Ansicht mit angefragt."""
+        return await self._mit_wiederholung(abruf, felder) if details else await abruf(felder)
+
     async def _ueber_suche(
-        self,
-        asana: AsanaClient,
-        text: str,
-        projekt_gid: str,
-        zustaendig_gid: str,
-        von: date | None,
-        bis: date | None,
-        nur_offene: bool,
+        self, asana: AsanaClient, f: "_Filter", felder: tuple[str, ...], details: bool
     ) -> tuple[list[dict], bool]:
+        """Die Suche kennt keine Seiten. Weitergeblättert wird über das Anlagedatum: Jede
+        Abfrage holt die 100 jüngsten Aufgaben, die älter sind als die letzte der vorigen."""
         params = {
-            "text": text or None,
-            "projects.any": projekt_gid or None,
-            "assignee.any": zustaendig_gid or None,
+            "text": f.text or None,
+            "projects.any": f.projekt or None,
+            "sections.any": f.abschnitt or None,
+            "assignee.any": f.zustaendig or None,
             # Einen Tag weiter gefasst, damit die Grenztage sicher enthalten sind.
-            "due_on.after": (von - timedelta(days=1)).isoformat() if von else None,
-            "due_on.before": (bis + timedelta(days=1)).isoformat() if bis else None,
-            "completed": "false" if nur_offene else None,
-            "sort_by": "due_date",
-            "sort_ascending": "true",
-            "limit": 100,
+            "due_on.after": (f.von - timedelta(days=1)).isoformat() if f.von else None,
+            "due_on.before": (f.bis + timedelta(days=1)).isoformat() if f.bis else None,
+            "completed": "false" if f.offen else None,
+            "sort_by": "created_at",
+            "sort_ascending": "false",
+            "limit": SUCH_SEITE,
         }
         pfad = f"/workspaces/{await asana.workspace_gid()}/tasks/search"
-        aufgaben = await self._mit_wiederholung(
-            lambda felder: asana.get(pfad, params, felder=felder), _AUFGABEN_FELDER
-        )
-        return aufgaben, len(aufgaben) >= 100
+        gefunden: dict[str, dict] = {}
+        while True:
+            seite = await self._lade(
+                lambda fl, p=dict(params): asana.get(pfad, p, felder=(*fl, "created_at")),
+                felder,
+                details,
+            )
+            neue = [a for a in seite if a["gid"] not in gefunden]
+            gefunden.update((a["gid"], a) for a in neue)
+            if len(gefunden) > MAX_SAMMEL:
+                return list(gefunden.values())[:MAX_SAMMEL], True
+            aelteste = seite[-1].get("created_at") if seite else None
+            if len(seite) < SUCH_SEITE or not neue or not aelteste:
+                return list(gefunden.values()), False
+            params["created_at.before"] = aelteste
 
-    async def _ueber_liste(
-        self, asana: AsanaClient, projekt_gid: str, zustaendig_gid: str, nur_offene: bool
+    async def _ueber_listen(
+        self, asana: AsanaClient, f: "_Filter", felder: tuple[str, ...], details: bool
     ) -> tuple[list[dict], bool]:
-        if projekt_gid:
-            params = {"project": projekt_gid}
-        elif zustaendig_gid:
-            params = {"assignee": zustaendig_gid, "workspace": await asana.workspace_gid()}
-        else:
+        """Ohne die Suche (nicht im Tarif): Listen je Abschnitt, Projekt oder Zuständigem; ohne
+        solche Eingrenzung alle aktiven Projekte der Reihe nach."""
+        offen = {"completed_since": "now"} if f.offen else {}
+
+        async def liste(pfad: str, params: dict) -> tuple[list[dict], bool]:
+            return await self._lade(
+                lambda fl: asana.liste(pfad, params, felder=fl, max_eintraege=MAX_GELADEN),
+                felder,
+                details,
+            )
+
+        if f.abschnitt:
+            aufgaben, weitere = await liste(f"/sections/{f.abschnitt}/tasks", dict(offen))
+        elif f.projekt:
+            aufgaben, weitere = await liste("/tasks", {"project": f.projekt, **offen})
+        elif f.zustaendig:
+            aufgaben, weitere = await liste(
+                "/tasks",
+                {"assignee": f.zustaendig, "workspace": await asana.workspace_gid(), **offen},
+            )
+            return aufgaben, weitere
+        elif not f.offen:
             raise ToolFehler(
                 "Die Suche über den ganzen Workspace ist im aktuellen Asana-Tarif nicht "
-                "enthalten. Bitte zusätzlich projekt_gid oder zustaendig_gid angeben."
+                "enthalten. Erledigte Aufgaben lassen sich deshalb nur mit projekt, abschnitt "
+                "oder zustaendig durchsuchen."
             )
-        if nur_offene:
-            params["completed_since"] = "now"
-        aufgaben, weitere = await self._mit_wiederholung(
-            lambda felder: asana.liste("/tasks", params, felder=felder, max_eintraege=MAX_GELADEN),
-            _AUFGABEN_FELDER,
-        )
-        if projekt_gid and zustaendig_gid:
-            ich = (await asana.get("/users/me"))["gid"] if zustaendig_gid == ICH else zustaendig_gid
+        else:
+            projekte, weitere = await asana.liste(
+                "/projects",
+                {"workspace": await asana.workspace_gid(), "archived": "false"},
+                max_eintraege=MAX_PROJEKTE_JE_SUCHE,
+            )
+            gefunden: dict[str, dict] = {}
+            for projekt in projekte:
+                teil, mehr = await liste("/tasks", {"project": projekt["gid"], **offen})
+                weitere = weitere or mehr
+                gefunden.update((a["gid"], a) for a in teil)
+            aufgaben = list(gefunden.values())
+        if f.zustaendig:
+            ich = (await asana.get("/users/me"))["gid"] if f.zustaendig == ICH else f.zustaendig
             aufgaben = [a for a in aufgaben if (a.get("assignee") or {}).get("gid") == ich]
         return aufgaben, weitere
 
@@ -494,6 +615,18 @@ def _im_zeitraum(faellig: str | None, von: date | None, bis: date | None) -> boo
         return False
     tag = date.fromisoformat(faellig)
     return (von is None or tag >= von) and (bis is None or tag <= bis)
+
+
+def _abschnitt_gids(aufgabe: dict) -> set[str]:
+    return {(z.get("section") or {}).get("gid", "") for z in aufgabe.get("memberships") or []}
+
+
+def _aufgabe_zeile(aufgabe: dict) -> str:
+    """Eine Aufgabe als kompakte Zeile „gid | fällig | projekt | name“."""
+    projekte = [_name(z.get("project")) for z in aufgabe.get("memberships") or []]
+    projekt = kuerze_text(next((p for p in projekte if p), ""), MAX_PROJEKTNAME_ZEICHEN) or "-"
+    name = kuerze_text(aufgabe.get("name"), MAX_NAME_ZEICHEN).replace("\n", " ")
+    return f"{aufgabe['gid']} | {aufgabe.get('due_on') or '-'} | {projekt} | {name}"
 
 
 def _aufgabe_kurz(aufgabe: dict) -> dict:

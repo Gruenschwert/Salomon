@@ -587,9 +587,10 @@ def akanal(akontext, session_fabrik, afreigaben, kosten, alarme, monkeypatch):
 
 async def test_lange_vorschau_geht_ueber_mehrere_nachrichten_mit_buttons_am_ende(akanal):
     vorschau = "\n".join(f"{n}. Anlegen: Aufgabe „{'x' * 80}“" for n in range(1, 101))
-    await akanal.sende_freigabe_anfrage(5, FreigabeAnfrage(3, vorschau))
+    await akanal.sende_freigabe_anfrage(5, FreigabeAnfrage(3, vorschau, anzahl=100))
 
-    assert len(akanal.gesendet) > 1
+    assert len(akanal.gesendet) > 2
+    assert akanal.gesendet[-1][0] == "Freigabe für 100 Änderungen, gültig 15 Minuten"
     assert all(len(text) <= TELEGRAM_MAX_ZEICHEN for text, _ in akanal.gesendet)
     assert all(buttons is None for _, buttons in akanal.gesendet[:-1])
     buttons = akanal.gesendet[-1][1]

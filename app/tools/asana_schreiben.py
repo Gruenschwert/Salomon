@@ -38,6 +38,7 @@ from app.tools.asana_operationen import (
     ZUSATZ_SCHEMA,
     Lauf,
     OpErgebnis,
+    bezeichnung,
     ist_loeschung,
     kategorie_von,
     loese_platzhalter_auf,
@@ -55,6 +56,9 @@ from app.tools.base import (
 
 log = logging.getLogger(__name__)
 
+# Ab so vielen gleichartigen Operationen wird die Vorschau gruppiert und gekürzt.
+KOMPAKT_AB = 15
+KOMPAKT_ZEILEN = 10
 STATUS_ERFOLGREICH = "erfolgreich"
 STATUS_ABGEBROCHEN = "abgebrochen"
 MAX_ZEILEN_IM_ERGEBNIS = 40
@@ -117,6 +121,9 @@ class AsanaAenderungenAusfuehren(BasisTool):
         "zweite Bestätigung des Nutzers und ist nicht rückgängig zu machen. Die GID muss aus "
         "einem Lese-Tool stammen, nie nach Name allein löschen. Abschnitte lassen sich nur "
         "leer löschen\n" + "\n".join(ZUSATZ_BESCHREIBUNG) + "\n"
+        "Sammelform: Gilt dieselbe Operation für viele Objekte, gib statt „gid“ die Liste "
+        "„gids“ an (bzw. „aufgabe_gids“ statt „aufgabe_gid“), z. B. aufgabe_erledigen mit "
+        "gids für 57 Aufgaben. Jede GID zählt als eine Operation.\n"
         "Platzhalter: Eine …_anlegen-Operation kann „platzhalter“ setzen ($p1 für Projekte, "
         "$s1 für Abschnitte, $a1 für Aufgaben, $t1 für Tags). Spätere Operationen desselben "
         "Satzes verwenden den Platzhalter überall dort, wo sonst eine GID steht. Alle anderen "
@@ -184,6 +191,17 @@ class AsanaAenderungenAusfuehren(BasisTool):
                         "archiviert": {"type": "boolean"},
                         "entfernen": {"type": "boolean"},
                         "aus_projekt_entfernen": {"type": "boolean"},
+                        "gids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Sammelform statt „gid“: dieselbe Operation für "
+                            "jede dieser GIDs",
+                        },
+                        "aufgabe_gids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Sammelform statt „aufgabe_gid“",
+                        },
                         **ZUSATZ_SCHEMA,
                     },
                     "required": ["operation"],
@@ -207,6 +225,12 @@ class AsanaAenderungenAusfuehren(BasisTool):
                 f"{maximum}. Bitte in mehrere Sätze aufteilen."
             )
         ops = pruefe_operationen(operationen)
+        # Die Sammelform („gids“) zählt mit jeder einzelnen Operation.
+        if len(ops) > maximum:
+            raise ToolFehler(
+                f"Der Änderungssatz hat {len(ops)} Operationen, erlaubt sind höchstens "
+                f"{maximum}. Bitte in mehrere Sätze aufteilen."
+            )
         self._pruefe_rollen(ops)
         self._pruefe_loeschungen(ops)
         return ops
@@ -245,8 +269,11 @@ class AsanaAenderungenAusfuehren(BasisTool):
         self, vorschau_text: str, operationen: list | None = None
     ) -> str | None:
         """Sätze mit Löschungen brauchen nach dem ersten ✅ eine zweite Rückfrage."""
-        ops = [op for op in operationen or [] if isinstance(op, dict)]
-        anzahl = sum(1 for op in ops if op.get("operation") in OP_TYPEN and ist_loeschung(op))
+        try:
+            ops = pruefe_operationen(operationen)
+        except ToolFehler:
+            return None
+        anzahl = sum(1 for op in ops if ist_loeschung(op))
         if not anzahl:
             return None
         zeilen = [f"Wirklich löschen? {anzahl} {'Objekt' if anzahl == 1 else 'Objekte'}"]
@@ -263,6 +290,31 @@ class AsanaAenderungenAusfuehren(BasisTool):
                 "Bestätigung."
             )
         return "\n".join(zeilen)
+
+    def vorschau_darstellung(self, vorschau_text: str, params: dict) -> tuple[int, str | None]:
+        """Ab mehr als 15 gleichartigen Operationen eine gruppierte Kurzfassung."""
+        try:
+            ops = pruefe_operationen(params.get("operationen"))
+        except ToolFehler:
+            return 1, None
+        kopf, *zeilen = vorschau_text.splitlines()
+        gruppen = Counter(
+            (kategorie_von(op) == KATEGORIE_LOESCHEN, bezeichnung(op["operation"])) for op in ops
+        )
+        if max(gruppen.values()) <= KOMPAKT_AB or len(zeilen) != len(ops):
+            return len(ops), None
+        kompakt = [kopf]
+        kompakt += [
+            f"{'🗑 ' if loeschung else ''}{anzahl} mal {name}"
+            for (loeschung, name), anzahl in gruppen.items()
+        ]
+        kompakt.append(f"Die ersten {KOMPAKT_ZEILEN}:")
+        kompakt += zeilen[:KOMPAKT_ZEILEN]
+        kompakt.append(
+            f"… und {len(zeilen) - KOMPAKT_ZEILEN} weitere. Die vollständige Liste steht in der "
+            "Datei."
+        )
+        return len(ops), "\n".join(kompakt)
 
     def vorschau(self, **params) -> str:
         raise ToolFehler("Die Vorschau braucht den aktuellen Stand aus Asana.")

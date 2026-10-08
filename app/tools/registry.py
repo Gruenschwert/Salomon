@@ -111,7 +111,10 @@ async def fuehre_tool_aus(
         # Claude und taucht weder im Text noch im Audit-Log auf.
         ansicht = daten.pop(ANSICHT_SCHLUESSEL, None) if isinstance(daten, dict) else None
         ergebnis = ToolErgebnis(
-            kuerze(json.dumps(daten, ensure_ascii=False, default=str)),
+            kuerze(
+                json.dumps(daten, ensure_ascii=False, default=str),
+                getattr(tool, "max_ergebnis_zeichen", None) or MAX_ERGEBNIS_ZEICHEN,
+            ),
             daten=daten,
             bloecke=(_ansicht_block(ansicht),) if ansicht else (),
         )

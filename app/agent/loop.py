@@ -22,10 +22,25 @@ from app.tools.registry import Registry, ToolErgebnis, fuehre_tool_aus
 
 log = logging.getLogger(__name__)
 
-MAX_ITERATIONEN_TEXT = (
-    "Ich habe die maximale Anzahl an Tool-Schritten erreicht und breche hier ab. "
-    "Bitte stelle die Frage enger gefasst noch einmal."
+MAX_ZWISCHENSTAND_ZEICHEN = 1500
+# So oft wird eine am Ausgabelimit abgeschnittene Textantwort fortgesetzt.
+MAX_FORTSETZUNGEN = 2
+FORTSETZEN_TEXT = (
+    "[System] Deine Antwort wurde am Ausgabelimit abgeschnitten. Fahre genau dort fort, wo du "
+    "aufgehört hast, ohne etwas zu wiederholen. Beginne mit einer neuen Zeile."
 )
+TOOL_ABGESCHNITTEN_TEXT = (
+    "[System] Dein Tool-Aufruf war zu lang und wurde am Ausgabelimit abgeschnitten. Er wurde "
+    "NICHT ausgeführt, es gibt keine Freigabe. Versuche es jetzt kürzer: Nutze bei "
+    "gleichartigen Operationen die Sammelform „gids“, lass Erklärtext weg und teile sehr "
+    "große Sätze in Pakete."
+)
+TOOL_ZU_LANG_TEXT = (
+    "Mein Tool-Aufruf war zu lang und wurde am Ausgabelimit (MAX_OUTPUT_TOKENS={limit}) "
+    "abgeschnitten, auch im zweiten, kürzeren Versuch. Es wurde nichts vorbereitet und nichts "
+    "geändert. Bitte grenze die Aufgabe ein oder lass MAX_OUTPUT_TOKENS erhöhen."
+)
+NUR_FREIGABE_TEXT = "Ich habe den Änderungssatz vorbereitet. Die Vorschau mit den Buttons folgt."
 WARTET_AUF_FREIGABE_TEXT = (
     "Wartet auf Freigabe des Nutzers. Das Tool wurde NICHT ausgeführt. Der Nutzer sieht jetzt "
     "eine Vorschau mit den Buttons ✅ / ❌. Beende die Runde mit einem kurzen Hinweis darauf."
@@ -36,7 +51,9 @@ TAGESLIMIT_TEXT = (
 DIENST_FEHLER_TEXT = "Der KI-Dienst ist gerade nicht erreichbar. Bitte versuche es später erneut."
 ABLEHNUNG_TEXT = "Diese Anfrage kann ich nicht beantworten."
 LEERE_ANTWORT_TEXT = "Dazu habe ich keine Antwort erhalten. Bitte formuliere die Frage neu."
-GEKUERZT_HINWEIS = "\n\n(Antwort wurde wegen der Längenbegrenzung gekürzt.)"
+GEKUERZT_HINWEIS = (
+    "\n\n(Hier endet meine Antwort am Ausgabelimit. Schreib „weiter“, dann setze ich fort.)"
+)
 FOTO_MARKE = "[Foto]"
 FOTO_OHNE_TEXT = "Bitte lies dieses Foto."
 DATEI_OHNE_TEXT = "(Der Nutzer hat nichts dazu geschrieben.)"
@@ -74,7 +91,9 @@ class Agent:
         # Freigaben, die in dieser Runde angelegt wurden; der Kanal zeigt sie mit Buttons an.
         anfragen: list[FreigabeAnfrage] = []
         try:
-            text = await self._schleife(messages, user, anfragen)
+            text = await self._schleife(
+                messages, user, anfragen, await self._freigaben.stand(user.id)
+            )
         except anthropic.APIError:
             log.exception("Claude-Aufruf fehlgeschlagen")
             return Antwort(text=DIENST_FEHLER_TEXT, freigaben=tuple(anfragen))
@@ -84,40 +103,104 @@ class Agent:
         return Antwort(text=text, freigaben=tuple(anfragen))
 
     async def _schleife(
-        self, messages: list[dict], user: User, anfragen: list[FreigabeAnfrage]
+        self,
+        messages: list[dict],
+        user: User,
+        anfragen: list[FreigabeAnfrage],
+        freigaben_stand: str = "",
     ) -> str:
+        settings = self._settings
         anfrage = {
-            "model": self._settings.model_default,
-            "max_tokens": self._settings.max_output_tokens,
-            "system": baue_system_prompt(datetime.now(ZoneInfo(self._settings.tz))),
+            "model": settings.model_default,
+            "max_tokens": settings.max_output_tokens,
+            "system": baue_system_prompt(datetime.now(ZoneInfo(settings.tz)), freigaben_stand),
         }
         if tools := self._registry.api_definitionen(user.rolle):
             anfrage["tools"] = tools
-        for _ in range(self._settings.max_tool_iterations):
+        tool_aufrufe = 0
+        letztes_tool = ""
+        zwischenstand = ""
+        teile: list[str] = []
+        tool_abgeschnitten = False
+        for runde in range(1, settings.agent_max_rounds + 1):
             response = await self._client.messages.create(**anfrage, messages=messages)
             await self._kosten.verbuche(user.id, *_tokens(response.usage))
-            if response.stop_reason != "tool_use":
-                return _antworttext(response)
-            messages.append({"role": "assistant", "content": response.content})
-            ergebnisse = []
-            for block in response.content:
-                if block.type != "tool_use":
+            text = _text(response)
+            if response.stop_reason == "tool_use":
+                tool_abgeschnitten = False
+                zwischenstand = text or zwischenstand
+                messages.append({"role": "assistant", "content": response.content})
+                ergebnisse = []
+                for block in response.content:
+                    if block.type != "tool_use":
+                        continue
+                    tool_aufrufe += 1
+                    letztes_tool = block.name
+                    ergebnis = await self._bearbeite_tool_anfrage(
+                        block.name, block.input, user, anfragen
+                    )
+                    ergebnisse.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": [{"type": "text", "text": ergebnis.text}, *ergebnis.bloecke]
+                            if ergebnis.bloecke
+                            else ergebnis.text,
+                            "is_error": ergebnis.fehler,
+                        }
+                    )
+                messages.append({"role": "user", "content": ergebnisse})
+                continue
+            if response.stop_reason == "refusal":
+                return ABLEHNUNG_TEXT
+            if response.stop_reason == "max_tokens":
+                if any(block.type == "tool_use" for block in response.content):
+                    # Der Tool-Aufruf ist unvollständig und darf weder ausgeführt noch in den
+                    # Verlauf übernommen werden. Claude bekommt einen zweiten, kürzeren Versuch.
+                    log.warning(
+                        "Tool-Aufruf am Ausgabelimit abgeschnitten (Runde %s, max_tokens=%s)",
+                        runde,
+                        settings.max_output_tokens,
+                    )
+                    if tool_abgeschnitten:
+                        return TOOL_ZU_LANG_TEXT.format(limit=settings.max_output_tokens)
+                    tool_abgeschnitten = True
+                    messages.append(
+                        {"role": "assistant", "content": text or "(Tool-Aufruf begonnen)"}
+                    )
+                    messages.append({"role": "user", "content": TOOL_ABGESCHNITTEN_TEXT})
                     continue
-                ergebnis = await self._bearbeite_tool_anfrage(
-                    block.name, block.input, user, anfragen
+                if text and len(teile) < MAX_FORTSETZUNGEN:
+                    teile.append(text)
+                    messages.append({"role": "assistant", "content": text})
+                    messages.append({"role": "user", "content": FORTSETZEN_TEXT})
+                    continue
+            gesamt = "\n".join([*teile, text]).strip()
+            if not gesamt:
+                if anfragen:
+                    return NUR_FREIGABE_TEXT
+                # Wirklich kein Text: festhalten, wie es dazu kam.
+                log.warning(
+                    "Leere Antwort von Claude: stop_reason=%s, Runden=%s, Tool-Aufrufe=%s, "
+                    "letztes Tool=%s",
+                    response.stop_reason,
+                    runde,
+                    tool_aufrufe,
+                    letztes_tool or "-",
                 )
-                ergebnisse.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": [{"type": "text", "text": ergebnis.text}, *ergebnis.bloecke]
-                        if ergebnis.bloecke
-                        else ergebnis.text,
-                        "is_error": ergebnis.fehler,
-                    }
-                )
-            messages.append({"role": "user", "content": ergebnisse})
-        return MAX_ITERATIONEN_TEXT
+                return LEERE_ANTWORT_TEXT
+            if response.stop_reason == "max_tokens":
+                gesamt += GEKUERZT_HINWEIS
+            return gesamt
+        log.warning(
+            "Rundenlimit erreicht: Runden=%s, Tool-Aufrufe=%s, letztes Tool=%s",
+            settings.agent_max_rounds,
+            tool_aufrufe,
+            letztes_tool or "-",
+        )
+        return _rundenlimit_text(
+            settings.agent_max_rounds, tool_aufrufe, letztes_tool, zwischenstand, len(anfragen)
+        )
 
     async def _bearbeite_tool_anfrage(
         self, name: str, params: dict, user: User, anfragen: list[FreigabeAnfrage]
@@ -198,12 +281,29 @@ def _tokens(usage: anthropic.types.Usage) -> tuple[int, int]:
     return eingabe, usage.output_tokens
 
 
-def _antworttext(response: anthropic.types.Message) -> str:
-    if response.stop_reason == "refusal":
-        return ABLEHNUNG_TEXT
-    text = "\n".join(block.text for block in response.content if block.type == "text").strip()
-    if not text:
-        return LEERE_ANTWORT_TEXT
-    if response.stop_reason == "max_tokens":
-        text += GEKUERZT_HINWEIS
-    return text
+def _text(response: anthropic.types.Message) -> str:
+    return "\n".join(block.text for block in response.content if block.type == "text").strip()
+
+
+def _rundenlimit_text(
+    runden: int, tool_aufrufe: int, letztes_tool: str, zwischenstand: str, freigaben: int
+) -> str:
+    """Ehrliche Meldung mit Zwischenstand, wenn die Aufgabe im Rundenlimit nicht fertig wird."""
+    zeilen = [
+        f"Ich habe nach {runden} Runden aufgehört und bin mit der Aufgabe nicht fertig geworden "
+        f"({tool_aufrufe} Tool-Aufrufe, zuletzt {letztes_tool or 'keiner'})."
+    ]
+    if zwischenstand:
+        if len(zwischenstand) > MAX_ZWISCHENSTAND_ZEICHEN:
+            zwischenstand = zwischenstand[: MAX_ZWISCHENSTAND_ZEICHEN - 1] + "…"
+        zeilen.append(f"Zwischenstand: {zwischenstand}")
+    if freigaben == 1:
+        zeilen.append("Ein Änderungssatz ist vorbereitet und wartet auf deine Freigabe.")
+    elif freigaben:
+        zeilen.append(f"{freigaben} Änderungssätze sind vorbereitet und warten auf deine Freigabe.")
+    else:
+        zeilen.append("Es wurde nichts geändert.")
+    zeilen.append(
+        "Schreib „weiter“, dann mache ich an dieser Stelle weiter, oder grenze die Aufgabe ein."
+    )
+    return "\n".join(zeilen)

@@ -127,8 +127,10 @@ async def test_aufgaben_suchen_ueber_die_suche(akontext, fake):
         zustaendig_gid="me",
         faellig_von="2026-10-09",
         faellig_bis="2026-10-12",
+        details=True,
     )
 
+    assert ergebnis["gesamt"] == 2
     assert [a["gid"] for a in ergebnis["eintraege"]] == ["1", "2"]
     assert ergebnis["eintraege"][0] == {
         "gid": "1",
@@ -157,7 +159,7 @@ async def test_aufgaben_suchen_weicht_ohne_bezahlten_tarif_auf_die_liste_aus(ako
     tool = AsanaAufgabenSuchen(akontext)
 
     ergebnis = await tool.ausfuehren(text="etikett", projekt_gid="77")
-    assert [a["gid"] for a in ergebnis["eintraege"]] == ["1", "3"]
+    assert [zeile.split(" | ")[0] for zeile in ergebnis["aufgaben"]] == ["1", "3"]
     liste = _letzte(fake, "/tasks").url.params
     assert liste["project"] == "77"
     assert liste["completed_since"] == "now"
@@ -169,10 +171,38 @@ async def test_aufgaben_suchen_weicht_ohne_bezahlten_tarif_auf_die_liste_aus(ako
     assert _letzte(fake, "/tasks").url.params["workspace"] == "ws1"
 
 
-async def test_aufgaben_suchen_ohne_suche_braucht_projekt_oder_zustaendigen(akontext, fake):
+async def test_ohne_suche_und_ohne_eingrenzung_geht_der_bot_alle_projekte_selbst_durch(
+    akontext, fake
+):
     fake.route("GET", SUCHE, httpx.Response(402, json={"errors": []}))
-    with pytest.raises(ToolFehler, match="projekt_gid oder zustaendig_gid"):
-        await AsanaAufgabenSuchen(akontext).ausfuehren(text="x")
+    fake.route("GET", "/projects", [{"gid": "100"}, {"gid": "101"}])
+    fake.route(
+        "GET",
+        "/tasks",
+        lambda anfrage: httpx.Response(
+            200,
+            json={
+                "data": [_aufgabe("1", "Gemeinsam", "2026-01-05")]
+                + (
+                    [_aufgabe("2", "Nur in 100", "2026-01-06")]
+                    if anfrage.url.params["project"] == "100"
+                    else [_aufgabe("3", "Nur in 101", "2099-01-01")]
+                )
+            },
+        ),
+    )
+    tool = AsanaAufgabenSuchen(akontext)
+    ergebnis = await tool.ausfuehren(ueberfaellig=True)
+    # Jedes Projekt genau einmal, doppelte Aufgaben nur einmal, Zukunft ausgefiltert.
+    assert [zeile.split(" | ")[0] for zeile in ergebnis["aufgaben"]] == ["1", "2"]
+    assert ergebnis["gesamt"] == 2
+    assert [a.url.params["project"] for a in fake.anfragen if a.url.path.endswith("/tasks")] == [
+        "100",
+        "101",
+    ]
+    # Erledigte Aufgaben des ganzen Workspace wären zu viel; das wird klar gesagt.
+    with pytest.raises(ToolFehler, match="nur mit projekt, abschnitt oder zustaendig"):
+        await tool.ausfuehren(text="x", nur_offen=False)
 
 
 async def test_aufgaben_suchen_prueft_eingaben(akontext, fake):
@@ -189,8 +219,10 @@ async def test_aufgaben_suchen_prueft_eingaben(akontext, fake):
 async def test_aufgaben_suchen_limit(akontext, fake):
     fake.route("GET", SUCHE, [_aufgabe(str(n), f"A{n}") for n in range(50)])
     tool = AsanaAufgabenSuchen(akontext)
-    assert (await tool.ausfuehren(projekt_gid="77", limit=99))["anzahl"] == 30
-    assert (await tool.ausfuehren(projekt_gid="77", limit=5))["anzahl"] == 5
+    assert (await tool.ausfuehren(projekt_gid="77", limit=99, details=True))["anzahl"] == 30
+    assert (await tool.ausfuehren(projekt_gid="77", limit=5, details=True))["anzahl"] == 5
+    kompakt = await tool.ausfuehren(projekt_gid="77", limit=5)
+    assert (kompakt["gesamt"], kompakt["angezeigt"], len(kompakt["aufgaben"])) == (50, 5, 5)
 
 
 async def test_aufgabe_details(akontext, fake):

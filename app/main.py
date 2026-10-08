@@ -19,6 +19,9 @@ from app.tools.registry import lade_registry
 
 log = logging.getLogger(__name__)
 
+# Darunter passen größere Änderungssätze nicht in eine Antwort von Claude.
+MIN_OUTPUT_TOKENS_EMPFOHLEN = 4000
+
 
 def erstelle_anthropic_client(settings: Settings) -> anthropic.AsyncAnthropic:
     kopfzeilen = {}
@@ -48,6 +51,11 @@ def main() -> None:
         await synchronisiere_whitelist(session_fabrik, settings)
         log.info("gs-assistant %s gestartet", __version__)
         await alarme.melde(f"✅ gs-assistant {__version__} wurde gestartet.")
+        if settings.max_output_tokens < MIN_OUTPUT_TOKENS_EMPFOHLEN:
+            await alarme.melde(
+                f"⚠️ MAX_OUTPUT_TOKENS={settings.max_output_tokens} ist niedrig. Lange Antworten "
+                "und große Asana-Änderungssätze werden damit abgeschnitten. Empfohlen: 8000."
+            )
 
     kanal = TelegramKanal(
         settings,

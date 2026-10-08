@@ -320,8 +320,9 @@ async def test_telegram_zeigt_die_rueckfrage_mit_eigenen_buttons(
     await kanal._bei_klick(_update(ADMIN_ID, query=erster), None)
 
     assert erster.buttons_entfernt
-    ((text, buttons),) = gesendet
+    (text, ohne), (frage, buttons) = gesendet
     assert text.startswith("Wirklich löschen? 2 Objekte")
+    assert ohne is None and frage.startswith("Löschen bestätigen?")
     assert [(b.text, b.callback_data) for b in buttons.inline_keyboard[0]] == [
         ("🗑 Ja, löschen", f"freigabe:{anfrage.approval_id}:loeschen"),
         ("Abbrechen", f"freigabe:{anfrage.approval_id}:nein"),
