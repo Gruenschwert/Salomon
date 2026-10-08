@@ -141,6 +141,8 @@ class OpErgebnis:
     ist_projekt: bool = False
     felder: tuple[str, ...] = ()
     vorher: dict = field(default_factory=dict)
+    # Zusätzliche Angaben für das Audit-Log
+    audit: dict = field(default_factory=dict)
 
 
 class Lauf:

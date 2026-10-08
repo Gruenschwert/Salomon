@@ -25,6 +25,8 @@ class Tool(Protocol):
     # nur bei schreibend=True: lesbare Vorschau für den Freigabe-Button
     def vorschau(self, **params) -> str: ...
 
+    def ist_schreibend(self, params: dict) -> bool: ...
+
     async def bereite_vor(self, **params) -> str: ...
 
     def ergebnis_text(self, ergebnis: dict) -> str | None: ...
@@ -108,6 +110,11 @@ class BasisTool:
 
     def vorschau(self, **params) -> str:
         raise NotImplementedError
+
+    def ist_schreibend(self, params: dict) -> bool:
+        """Ob dieser Aufruf eine Freigabe braucht. Nur wenige Tools hängen von den Parametern
+        ab (ein allgemeiner API-Aufruf liest mit GET und schreibt mit POST)."""
+        return self.schreibend
 
     async def bereite_vor(self, **params) -> str:
         """Liefert die Vorschau für die Freigabe. Tools, die dafür erst den aktuellen Zustand

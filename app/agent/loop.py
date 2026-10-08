@@ -132,7 +132,7 @@ class Agent:
                 fehler="nicht verfügbar",
             )
             return ToolErgebnis(f"Das Tool {name} ist nicht verfügbar.", fehler=True)
-        if not tool.schreibend:
+        if not tool.ist_schreibend(params):
             return await fuehre_tool_aus(tool, params, user, self._kontext)
         # Schreibend: NICHT ausführen, sondern Freigabe anlegen.
         try:

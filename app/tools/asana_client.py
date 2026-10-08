@@ -121,6 +121,13 @@ class AsanaClient:
             teile["file"] = datei
         return (await self._anfrage("POST", pfad, {}, formular=teile))["data"]
 
+    async def roh(
+        self, methode: str, pfad: str, params: dict | None = None, daten: dict | None = None
+    ) -> dict:
+        """Beliebiger Aufruf; liefert die ganze Antwort samt `next_page`. Der Aufrufer muss
+        den Pfad vorher geprüft haben."""
+        return await self._anfrage(methode, pfad, params or {}, daten)
+
     async def warte(self, sekunden: float) -> None:
         """Pause zwischen zwei Abfragen (in Tests ersetzt)."""
         await self._schlaf(sekunden)

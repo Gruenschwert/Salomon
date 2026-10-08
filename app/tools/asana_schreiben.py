@@ -19,6 +19,7 @@ from app.observability.audit import protokolliere
 # Die Module mit weiteren Operationen tragen sich beim Import in OP_TYPEN ein.
 from app.tools import (  # noqa: F401
     asana_ops_anhaenge,
+    asana_ops_api,
     asana_ops_aufgaben,
     asana_ops_felder,
     asana_ops_mitglieder,
@@ -318,7 +319,12 @@ class AsanaAenderungenAusfuehren(BasisTool):
                     # Kein Wiederholen, kein Zurückrollen: Der Satz hört hier auf.
                     eintrag.update(status=OP_FEHLGESCHLAGEN, fehler=fehler, text=_kurz(op))
                     audit.append(
-                        {"nr": eintrag["nr"], "operation": op["operation"], "ergebnis": fehler}
+                        {
+                            "nr": eintrag["nr"],
+                            "operation": op["operation"],
+                            **_api_angaben(op),
+                            "ergebnis": fehler,
+                        }
                     )
                     await self._setze(
                         approval_id, eintrag["nr"], status=OP_FEHLGESCHLAGEN, fehler=fehler
@@ -337,6 +343,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
                         "gid": ergebnis.gid,
                         "felder": list(ergebnis.felder),
                         "vorher": ergebnis.vorher,
+                        **ergebnis.audit,
                         "ergebnis": OP_ERLEDIGT,
                     }
                 )
@@ -451,6 +458,11 @@ class AsanaAenderungenAusfuehren(BasisTool):
                 .values(status=OP_NICHT_AUSGEFUEHRT)
             )
             await session.commit()
+
+
+def _api_angaben(op: dict) -> dict:
+    """Beim allgemeinen API-Aufruf gehören Methode, Pfad und Body auch bei Fehlern ins Log."""
+    return {feld: op[feld] for feld in ("methode", "pfad", "abfrage", "body") if feld in op}
 
 
 def _kurz(op: dict) -> str:
