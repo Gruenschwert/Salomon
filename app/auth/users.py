@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from types import MappingProxyType
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
 
@@ -85,6 +86,11 @@ async def finde_erlaubten_nutzer(
             {"ton": user.ton, "zeitzone": user.zeitzone, "tageslimit_eur": user.tageslimit_eur}
         ),
     )
+
+
+async def alle_nutzer_ids(session_fabrik: SessionFabrik) -> list[int]:
+    async with session_fabrik() as session:
+        return list(await session.scalars(select(User.id).order_by(User.id)))
 
 
 async def aktive_mit_rolle(session_fabrik: SessionFabrik, rolle: str) -> list[User]:
@@ -231,3 +237,33 @@ async def setze_merker(session_fabrik: SessionFabrik, schluessel: str, wert: str
         if await session.get(SystemEinstellung, schluessel) is None:
             session.add(SystemEinstellung(schluessel=schluessel, wert=wert))
             await session.commit()
+
+
+TOENE = ("du", "sie")
+
+
+async def aendere_profil(session_fabrik: SessionFabrik, user_id: int, feld: str, wert: str) -> str:
+    """Ändert Name, Ton oder Zeitzone der eigenen Person. Liefert den gespeicherten Wert."""
+    wert = wert.strip()
+    if feld == "name":
+        if not wert or len(wert) > 200:
+            raise NutzerFehler("Der Name darf nicht leer sein und höchstens 200 Zeichen haben.")
+        spalte = "anzeigename"
+    elif feld == "ton":
+        wert = wert.lower()
+        if wert not in TOENE:
+            raise NutzerFehler("Möglich sind: du, sie.")
+        spalte = "ton"
+    elif feld == "zeitzone":
+        try:
+            ZoneInfo(wert)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise NutzerFehler("Diese Zeitzone kenne ich nicht. Beispiel: Europe/Berlin") from None
+        spalte = "zeitzone"
+    else:
+        raise NutzerFehler("Ändern kannst du: name, ton, zeitzone.")
+    async with session_fabrik() as session:
+        user = await session.get(User, user_id)
+        setattr(user, spalte, wert)
+        await session.commit()
+    return wert

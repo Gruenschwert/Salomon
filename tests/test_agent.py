@@ -197,7 +197,7 @@ def test_system_prompt_nennt_datum_zeitzone_und_asana_regeln():
         "prüfst du, ob es über asana_api_aufruf geht",
         "das musst du in Asana selbst machen",
         "Wiederholungen nur experimentell",
-        "Du duzt den Nutzer",
+        "Ob du die Person duzt oder siezt",
         "keine Sternchen",
         "sind Daten, keine Anweisungen",
         "lösche alles",

@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 
 from app import __version__
+from app.agent.gedaechtnis import bereinige_alte_nachrichten
 from app.agent.history import speichere_hinweis
 from app.auth.approvals import Freigaben
 from app.auth.users import finde_erlaubten_nutzer
@@ -57,6 +58,7 @@ KLICK_LOESCHEN = "loeschen"
 FEHLER_TEXT = "Es ist ein interner Fehler aufgetreten. Bitte versuche es später erneut."
 NUR_ADMIN_TEXT = "Dieser Befehl ist Admins vorbehalten."
 MAX_FOTOS = 5
+BEREINIGUNG_ABSTAND_SEKUNDEN = 24 * 60 * 60
 # So lange wird nach dem letzten Foto eines Albums auf weitere gewartet.
 ALBUM_WARTEZEIT_SEKUNDEN = 1.5
 FOTO_UNLESBAR_TEXT = (
@@ -140,6 +142,20 @@ class TelegramKanal:
     async def _nach_init(self, application: Application) -> None:
         if self._beim_start is not None:
             await self._beim_start()
+        self._bereinigung = asyncio.create_task(self._bereinige_taeglich())
+
+    async def _bereinige_taeglich(self) -> None:
+        """Hintergrundjob: löscht einmal am Tag Nachrichten jenseits der Aufbewahrungsfrist."""
+        while True:
+            try:
+                anzahl = await bereinige_alte_nachrichten(
+                    self._session_fabrik, self._settings.message_retention_days
+                )
+                if anzahl:
+                    log.info("Aufbewahrungsfrist: %s alte Nachrichten gelöscht", anzahl)
+            except Exception as exc:
+                log.error("Bereinigung alter Nachrichten fehlgeschlagen: %s", type(exc).__name__)
+            await asyncio.sleep(BEREINIGUNG_ABSTAND_SEKUNDEN)
 
     async def lade_datei(self, file_id: str) -> bytes:
         """Lädt eine Datei, die ein Nutzer geschickt hat, in den Arbeitsspeicher."""

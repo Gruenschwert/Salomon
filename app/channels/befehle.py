@@ -5,10 +5,12 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from app.agent.gedaechtnis import GedaechtnisFehler, lade_notizen, merke, vergiss_alles
 from app.auth.kontext import NutzerKontext
 from app.auth.rechte import ADMIN_NUTZER, RECHTE
 from app.auth.users import (
     NutzerFehler,
+    aendere_profil,
     aendere_rolle,
     finde_nutzer,
     lege_nutzer_an,
@@ -54,6 +56,8 @@ class _Aktion:
     parameter: dict
     ausfuehren: Callable[[], Awaitable[None]]
     gueltig_bis: float
+    # Recht, das beim Klick noch einmal geprüft wird; None = eigene Daten, kein Recht nötig
+    recht: str | None = ADMIN_NUTZER
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,10 @@ class Befehle:
             ),
             Befehl("trennen", "eigenen Zugang entfernen, z. B. /trennen asana", self._trennen),
             Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
+            Befehl("profil", "Name, Anrede und Zeitzone anzeigen oder ändern", self._profil),
+            Befehl("merken", "persönliche Notiz speichern: /merken <text>", self._merken),
+            Befehl("gemerkt", "zeigt deine Notizen", self._gemerkt),
+            Befehl("vergessen", "löscht deinen Verlauf und deine Notizen", self._vergessen),
             Befehl("nutzer", "Liste aller Personen mit Rollen", self._nutzer, ADMIN_NUTZER),
             Befehl(
                 "nutzer_neu",
@@ -136,8 +144,54 @@ class Befehle:
             return "Dafür fehlt dir das Recht. Die Rolle dafür kann ein Admin vergeben."
         try:
             return await befehl.funktion(nutzer, argumente, chat_id, privat)
-        except (ToolFehler, NutzerFehler) as exc:
+        except (ToolFehler, NutzerFehler, GedaechtnisFehler) as exc:
             return str(exc)
+
+    # ---------------------------------------------------------------- Profil und Notizen
+
+    async def _profil(self, nutzer: NutzerKontext, argumente: list[str], *_: object) -> str:
+        if not argumente:
+            return "\n".join(
+                [
+                    "Dein Profil:",
+                    f"Name: {nutzer.anzeigename or '(nicht gesetzt)'}",
+                    f"Anrede: {nutzer.ton}",
+                    f"Zeitzone: {nutzer.zeitzone}",
+                    f"Rollen: {', '.join(sorted(nutzer.rollen)) or 'keine'}",
+                    "Ändern: /profil name <Name>, /profil ton du oder sie, "
+                    "/profil zeitzone Europe/Berlin",
+                ]
+            )
+        if len(argumente) < 2:
+            return "So geht es: /profil name <Name>, /profil ton du, /profil zeitzone Europe/Berlin"
+        feld = argumente[0].lower()
+        wert = await aendere_profil(self._session_fabrik, nutzer.id, feld, " ".join(argumente[1:]))
+        bezeichnung = {"name": "Name", "ton": "Anrede", "zeitzone": "Zeitzone"}[feld]
+        return f"Gespeichert. {bezeichnung}: {wert}"
+
+    async def _merken(self, nutzer: NutzerKontext, argumente: list[str], *_: object) -> str:
+        anzahl = await merke(self._session_fabrik, nutzer, " ".join(argumente))
+        wort = "Notiz" if anzahl == 1 else "Notizen"
+        return f"Gemerkt. Du hast jetzt {anzahl} {wort}. /gemerkt zeigt sie."
+
+    async def _gemerkt(self, nutzer: NutzerKontext, *_: object) -> str:
+        notizen = await lade_notizen(self._session_fabrik, nutzer)
+        if not notizen:
+            return "Du hast noch nichts gespeichert. Mit /merken <text> legst du eine Notiz an."
+        return "\n".join(["Deine Notizen:", *(f"{n}. {text}" for n, text in enumerate(notizen, 1))])
+
+    async def _vergessen(self, nutzer: NutzerKontext, *_: object) -> BefehlsAntwort:
+        async def ausfuehren() -> None:
+            await vergiss_alles(self._session_fabrik, nutzer)
+
+        return self._merke_aktion(
+            nutzer,
+            "vergessen",
+            "deinen gesamten Gesprächsverlauf und alle deine Notizen löschen (nicht umkehrbar)",
+            {},
+            ausfuehren,
+            recht=None,
+        )
 
     # ---------------------------------------------------------------- Hilfe
 
@@ -164,6 +218,7 @@ class Befehle:
         beschreibung: str,
         parameter: dict,
         ausfuehren: Callable[[], Awaitable[None]],
+        recht: str | None = ADMIN_NUTZER,
     ) -> BefehlsAntwort:
         kennung = secrets.token_hex(6)
         self._aktionen[kennung] = _Aktion(
@@ -173,6 +228,7 @@ class Befehle:
             parameter=parameter,
             ausfuehren=ausfuehren,
             gueltig_bis=time.monotonic() + AKTION_FRIST_SEKUNDEN,
+            recht=recht,
         )
         return BefehlsAntwort(f"Bitte bestätigen: {beschreibung}", aktion=kennung)
 
@@ -188,7 +244,7 @@ class Befehle:
         if time.monotonic() > aktion.gueltig_bis:
             return "Die Bestätigung ist abgelaufen. Es wurde nichts geändert."
         # Die Rechte werden beim Klick noch einmal geprüft.
-        if not nutzer.darf(ADMIN_NUTZER):
+        if aktion.recht is not None and not nutzer.darf(aktion.recht):
             return "Dafür fehlt dir das Recht. Es wurde nichts geändert."
         if not ja:
             return f"Abgebrochen: {aktion.beschreibung}"

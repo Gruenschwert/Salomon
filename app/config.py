@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     max_output_tokens: int = 8000
     daily_cost_limit_eur: Decimal = Decimal("5")
     history_max_messages: int = 20
+    # Nachrichten werden nach so vielen Tagen gelöscht (0 = nie)
+    message_retention_days: int = 90
 
     # Kostenberechnung: Preise von MODEL_DEFAULT in USD pro 1 Mio. Tokens, fester Kurs
     price_input_usd_per_mtok: Decimal

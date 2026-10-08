@@ -3,10 +3,11 @@
 import base64
 import logging
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anthropic
 
+from app.agent.gedaechtnis import lade_notizen
 from app.agent.history import lade_verlauf, speichere_austausch
 from app.agent.prompts import baue_system_prompt
 from app.auth.approvals import Freigaben
@@ -116,7 +117,10 @@ class Agent:
             "model": settings.model_default,
             "max_tokens": settings.max_output_tokens,
             "system": baue_system_prompt(
-                datetime.now(ZoneInfo(settings.tz)), freigaben_stand, user
+                datetime.now(_zone(user, settings.tz)),
+                freigaben_stand,
+                user,
+                await lade_notizen(self._session_fabrik, user),
             ),
         }
         if tools := self._registry.api_definitionen(user):
@@ -234,6 +238,14 @@ class Agent:
             log.exception("Freigabe für Tool %s konnte nicht angelegt werden", name)
             return ToolErgebnis(f"Interner Fehler im Tool {name}.", fehler=True)
         return ToolErgebnis(WARTET_AUF_FREIGABE_TEXT)
+
+
+def _zone(nutzer: NutzerKontext, standard: str) -> ZoneInfo:
+    """Die Zeitzone der Person; bei einem ungültigen Wert die des Systems."""
+    try:
+        return ZoneInfo(nutzer.zeitzone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo(standard)
 
 
 def _inhalt(nachricht: EingehendeNachricht) -> str | list[dict]:
