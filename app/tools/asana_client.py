@@ -121,6 +121,10 @@ class AsanaClient:
             teile["file"] = datei
         return (await self._anfrage("POST", pfad, {}, formular=teile))["data"]
 
+    async def warte(self, sekunden: float) -> None:
+        """Pause zwischen zwei Abfragen (in Tests ersetzt)."""
+        await self._schlaf(sekunden)
+
     async def workspace_gid(self) -> str:
         """Der konfigurierte Workspace oder der einzige, den der Token sieht."""
         if konfiguriert := self._kontext.settings.asana_workspace_gid.strip():
