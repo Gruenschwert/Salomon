@@ -46,3 +46,9 @@ class FakeAnthropic:
         if isinstance(antwort, Exception):
             raise antwort
         return antwort
+
+
+def system_text(aufruf: dict) -> str:
+    """Der System-Prompt eines Aufrufs als ein Text (die API bekommt ihn in Blöcken)."""
+    system = aufruf["system"]
+    return system if isinstance(system, str) else "".join(block["text"] for block in system)

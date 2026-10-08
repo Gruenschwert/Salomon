@@ -22,8 +22,13 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr
     # Optional: wird als Header `anthropic-workspace-id` mitgeschickt
     anthropic_workspace_id: str = ""
-    model_default: str
-    model_cheap: str
+    # Modellstufen. MODEL_DEFAULT ist der frühere Name von MODEL_STANDARD und gilt weiter,
+    # solange MODEL_STANDARD leer ist. MODEL_CHEAP wird nicht mehr gelesen.
+    model_default: str = ""
+    model_cheap: str = ""
+    model_einfach: str = "claude-haiku-4-5-20251001"
+    model_standard: str = ""
+    model_komplex: str = "claude-opus-5-5"
     # Höchstzahl der Runden (Claude-Aufrufe) je Nachricht; früher MAX_TOOL_ITERATIONS
     agent_max_rounds: int = 25
     max_output_tokens: int = 8000
@@ -94,6 +99,20 @@ class Settings(BaseSettings):
                 if not (wert == "" and name.lower() in mit_standard)
             }
         return werte
+
+    @model_validator(mode="after")
+    def _standardmodell(self) -> "Settings":
+        self.model_standard = (
+            self.model_standard.strip() or self.model_default.strip() or "claude-sonnet-5-5"
+        )
+        return self
+
+    def modell(self, stufe: str) -> str:
+        """Die Modell-ID einer Stufe (einfach, standard, komplex)."""
+        return {
+            "einfach": self.model_einfach.strip() or self.model_standard,
+            "komplex": self.model_komplex.strip() or self.model_standard,
+        }.get(stufe, self.model_standard)
 
     @model_validator(mode="after")
     def _admins_sind_erlaubt(self) -> "Settings":

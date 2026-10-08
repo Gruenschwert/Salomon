@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from app.agent.gedaechtnis import GedaechtnisFehler, lade_notizen, merke, vergiss_alles
+from app.agent.router import AUTO, STUFEN, ModellVorgaben
 from app.auth.kontext import NutzerKontext
 from app.auth.rechte import ADMIN_KOSTEN_ALLE, ADMIN_NUTZER, RECHTE
 from app.auth.users import (
@@ -79,10 +80,12 @@ class Befehle:
         session_fabrik: SessionFabrik,
         zugaenge: Zugaenge | None = None,
         kosten: Kosten | None = None,
+        vorgaben: ModellVorgaben | None = None,
     ) -> None:
         self._session_fabrik = session_fabrik
         self._zugaenge = zugaenge
         self._kosten = kosten
+        self._vorgaben = vorgaben or ModellVorgaben()
         # (Chat-ID, Telegram-ID) -> (Dienst, gültig bis). Die nächste Nachricht dieser Person
         # in diesem Chat ist dann ein Geheimnis und geht an niemanden sonst.
         self._erwartet: dict[tuple[int, int], tuple[str, float]] = {}
@@ -97,6 +100,7 @@ class Befehle:
             Befehl("trennen", "eigenen Zugang entfernen, z. B. /trennen asana", self._trennen),
             Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
             Befehl("kosten", "deine Kosten: /kosten oder /kosten 7 (1, 3, 7, 30)", self._kosten_),
+            Befehl("modell", "Modellstufe: /modell einfach, standard, komplex, auto", self._modell),
             Befehl("profil", "Name, Anrede und Zeitzone anzeigen oder ändern", self._profil),
             Befehl("merken", "persönliche Notiz speichern: /merken <text>", self._merken),
             Befehl("gemerkt", "zeigt deine Notizen", self._gemerkt),
@@ -253,6 +257,21 @@ class Befehle:
             {"telegram_id": person.telegram_id, "euro": str(euro) if euro is not None else None},
             lambda: self._kosten.setze_limit(person.id, euro),
         )
+
+    async def _modell(self, nutzer: NutzerKontext, argumente: list[str], *_: object) -> str:
+        aktuell = self._vorgaben.hole(nutzer.nutzer_id)
+        if not argumente:
+            return (
+                f"Modellstufe: {aktuell}. Mit auto wählt der Bot selbst: einfach für kurze "
+                "Lesefragen, komplex für Fotos, PDFs und Analysen, sonst standard. Ändern: "
+                "/modell einfach, /modell standard, /modell komplex oder /modell auto. Die "
+                "Wahl gilt bis zum nächsten Neustart des Bots."
+            )
+        stufe = argumente[0].lower()
+        if stufe not in (*STUFEN, AUTO):
+            return "Möglich sind: einfach, standard, komplex, auto."
+        self._vorgaben.setze(nutzer.nutzer_id, stufe)
+        return f"Modellstufe: {stufe}."
 
     # ---------------------------------------------------------------- Profil und Notizen
 

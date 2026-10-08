@@ -428,6 +428,7 @@ class AsanaStatusmeldungenAnzeigen(AsanaLeseTool):
 
 class AsanaAnhangAnsehen(AsanaLeseTool):
     name = "asana_anhang_ansehen"
+    komplex = True
     beschreibung = (
         "Lädt einen Anhang herunter und zeigt ihn dir zum Lesen. Geht nur für Bilder (JPEG, "
         "PNG, GIF, WebP) und PDFs bis zur eingestellten Größe. Die GID stammt aus "

@@ -37,7 +37,7 @@ from app.tools.base import ToolFehler
 from app.tools.registry import fuehre_tool_aus, lade_registry
 from tests.asana_fake import ASANA_TOKEN, FakeAsana, asana_kontext
 from tests.conftest import ERLAUBT_ID
-from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_block
+from tests.fakes import FakeAnthropic, claude_antwort, system_text, text_block, tool_use_block
 from tests.test_asana_schreiben import aufgabe
 
 # Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
@@ -620,7 +620,7 @@ async def test_stand_der_freigaben_steht_fuer_claude_im_systemprompt(
 
     client = FakeAnthropic(claude_antwort(text_block("Die Buttons warten noch auf dich.")))
     antwort = await baue_agent(client).beantworte(nachricht("mach das"), user)
-    system = client.aufrufe[0]["system"]
+    system = system_text(client.aufrufe[0])
     assert "Stand der letzten Freigaben dieses Nutzers" in system
     assert "wartet auf ✅ oder ❌ des Nutzers" in system and "verworfen" in system
     assert antwort.text == "Die Buttons warten noch auf dich."

@@ -12,7 +12,7 @@ from app.channels.base import EingehendeNachricht
 from app.db.models import AuditLog
 from tests.beispiel_tools.schreibend import BeispielSchreiben
 from tests.conftest import ERLAUBT_ID
-from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_block
+from tests.fakes import FakeAnthropic, claude_antwort, system_text, text_block, tool_use_block
 
 CHAT_ID = 7
 _WOCHENTAGE = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
@@ -39,10 +39,10 @@ async def test_antwort_und_verlauf(settings, session_fabrik, baue_agent, user):
 
     assert antwort.text == "Hallo!"
     aufruf = client.aufrufe[0]
-    assert aufruf["model"] == settings.model_default
+    assert aufruf["model"] == settings.model_standard == "test-modell"
     assert aufruf["max_tokens"] == settings.max_output_tokens
-    assert aufruf["system"].startswith(SYSTEM_PROMPT + ASANA_REGELN)
-    assert f"Heute ist {_HEUTE}" in aufruf["system"]
+    assert system_text(aufruf).startswith(SYSTEM_PROMPT + ASANA_REGELN)
+    assert f"Heute ist {_HEUTE}" in system_text(aufruf)
     assert aufruf["messages"] == [{"role": "user", "content": "Hi"}]
     assert await lade_verlauf(session_fabrik, user, CHAT_ID, 20) == [
         {"role": "user", "content": "Hi"},

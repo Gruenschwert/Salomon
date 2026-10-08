@@ -100,6 +100,8 @@ class BasisTool:
     beschreibung: ClassVar[str]
     parameter_schema: ClassVar[dict]
     schreibend: ClassVar[bool] = False
+    # True: Dieses Tool braucht das starke Modell (z. B. Bilder und PDFs lesen).
+    komplex: ClassVar[bool] = False
     # Obergrenze des Ergebnistexts für Claude; None = Standard der Registry
     max_ergebnis_zeichen: ClassVar[int | None] = None
     # True: Das Ergebnis der Freigabe wird in den Gesprächsverlauf geschrieben.

@@ -138,25 +138,51 @@ def person_abschnitt(nutzer: NutzerKontext, notizen: list[str] | None = None) ->
     )
 
 
+def fester_teil() -> str:
+    """Der für alle gleiche Teil des System-Prompts. Er ändert sich nie zwischen zwei Anfragen
+    und liegt deshalb im Prompt-Cache."""
+    return f"{SYSTEM_PROMPT}{ASANA_REGELN}"
+
+
+def persoenlicher_teil(
+    jetzt: datetime,
+    freigaben_stand: str = "",
+    nutzer: NutzerKontext | None = None,
+    notizen: list[str] | None = None,
+) -> str:
+    """Person, Datum und Stand der Freigaben: ändert sich je Person und je Minute und steht
+    deshalb hinter dem gecachten Teil."""
+    text = (
+        f"{person_abschnitt(nutzer, notizen) if nutzer is not None else ''}\n"
+        f"Heute ist {_WOCHENTAGE[jetzt.weekday()]}, der {jetzt:%d.%m.%Y}, {jetzt:%H:%M} Uhr "
+        f"(Zeitzone {jetzt.tzinfo}).\n"
+    )
+    if freigaben_stand:
+        text += (
+            "\nStand der letzten Freigaben dieses Nutzers (vom System, verlässlich):\n"
+            f"{freigaben_stand}\n"
+        )
+    return text
+
+
 def baue_system_prompt(
     jetzt: datetime,
     freigaben_stand: str = "",
     nutzer: NutzerKontext | None = None,
     notizen: list[str] | None = None,
 ) -> str:
-    """Vollständiger System-Prompt mit heutigem Datum; `jetzt` trägt die Zeitzone.
+    """Vollständiger System-Prompt als ein Text; `jetzt` trägt die Zeitzone."""
+    return fester_teil() + persoenlicher_teil(jetzt, freigaben_stand, nutzer, notizen)
 
-    `freigaben_stand` nennt die letzten Freigaben des Nutzers und was aus ihnen wurde.
-    """
-    prompt = (
-        f"{SYSTEM_PROMPT}{ASANA_REGELN}"
-        f"{person_abschnitt(nutzer, notizen) if nutzer is not None else ''}\n"
-        f"Heute ist {_WOCHENTAGE[jetzt.weekday()]}, der {jetzt:%d.%m.%Y}, {jetzt:%H:%M} Uhr "
-        f"(Zeitzone {jetzt.tzinfo}).\n"
-    )
-    if freigaben_stand:
-        prompt += (
-            "\nStand der letzten Freigaben dieses Nutzers (vom System, verlässlich):\n"
-            f"{freigaben_stand}\n"
-        )
-    return prompt
+
+def system_bloecke(
+    jetzt: datetime,
+    freigaben_stand: str = "",
+    nutzer: NutzerKontext | None = None,
+    notizen: list[str] | None = None,
+) -> list[dict]:
+    """Der System-Prompt für die API: fester Teil mit Cache-Marke, danach der persönliche."""
+    return [
+        {"type": "text", "text": fester_teil(), "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": persoenlicher_teil(jetzt, freigaben_stand, nutzer, notizen)},
+    ]

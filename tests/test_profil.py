@@ -24,7 +24,7 @@ from app.channels.telegram import TelegramKanal
 from app.db.models import Message, TelegramDatei, UserMemory, jetzt
 from app.db.session import db_sitzung
 from tests.conftest import ADMIN_ID, ERLAUBT_ID
-from tests.fakes import FakeAnthropic, claude_antwort, text_block
+from tests.fakes import FakeAnthropic, claude_antwort, system_text, text_block
 from tests.test_rollen import FakeQuery
 
 CHAT_ID = 5
@@ -163,7 +163,7 @@ async def test_claude_sieht_nur_die_notizen_der_fragenden_person(
 
     await agent.beantworte(frage(ERLAUBT_ID), user)
     await agent.beantworte(frage(ADMIN_ID), admin)
-    fuer_lea, fuer_theis = (aufruf["system"] for aufruf in client.aufrufe)
+    fuer_lea, fuer_theis = (system_text(aufruf) for aufruf in client.aufrufe)
     assert "Notiz von Lea" in fuer_lea and "Notiz von Theis" not in fuer_lea
     assert "Notiz von Theis" in fuer_theis and "Notiz von Lea" not in fuer_theis
 
@@ -174,7 +174,7 @@ async def test_zeitzone_der_person_bestimmt_das_datum_im_prompt(baue_agent, sess
     await baue_agent(client).beantworte(
         EingehendeNachricht(chat_id=1, absender_id=ERLAUBT_ID, absender_name="X", text="Hi"), tokio
     )
-    assert "(Zeitzone Asia/Tokyo)" in client.aufrufe[0]["system"]
+    assert "(Zeitzone Asia/Tokyo)" in system_text(client.aufrufe[0])
 
 
 # ---------------------------------------------------------------- /vergessen

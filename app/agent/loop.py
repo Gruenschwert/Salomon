@@ -9,7 +9,8 @@ import anthropic
 
 from app.agent.gedaechtnis import lade_notizen
 from app.agent.history import lade_verlauf, speichere_austausch
-from app.agent.prompts import baue_system_prompt
+from app.agent.prompts import system_bloecke
+from app.agent.router import EINFACH, KOMPLEX, STANDARD, ModellVorgaben, Modellwahl, waehle_modell
 from app.auth.approvals import Freigaben
 from app.auth.kontext import NutzerKontext
 from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
@@ -18,7 +19,7 @@ from app.db.session import SessionFabrik
 from app.medien import groesse_text
 from app.observability.audit import protokolliere
 from app.observability.costs import Kosten
-from app.tools.base import ToolFehler, ToolKontext
+from app.tools.base import BasisTool, ToolFehler, ToolKontext
 from app.tools.registry import Registry, ToolErgebnis, fuehre_tool_aus
 
 log = logging.getLogger(__name__)
@@ -65,6 +66,15 @@ DATEIEN_KOPF = (
 )
 
 
+class _Eskalation(Exception):
+    """Der Lauf mit dem einfachen Modell ist gescheitert und wird mit dem Standardmodell
+    wiederholt."""
+
+    def __init__(self, grund: str) -> None:
+        super().__init__(grund)
+        self.grund = grund
+
+
 class Agent:
     def __init__(
         self,
@@ -74,8 +84,12 @@ class Agent:
         registry: Registry,
         freigaben: Freigaben,
         kosten: Kosten,
+        vorgaben: ModellVorgaben | None = None,
     ) -> None:
         self._settings = settings
+        self._vorgaben = vorgaben or ModellVorgaben()
+        # Modelle, die die API in dieser Laufzeit als nicht verfügbar gemeldet hat
+        self._nicht_verfuegbar: set[str] = set()
         self._session_fabrik = session_fabrik
         self._client = client
         self._registry = registry
@@ -92,8 +106,17 @@ class Agent:
         messages = [*verlauf, {"role": "user", "content": _inhalt(nachricht)}]
         # Freigaben, die in dieser Runde angelegt wurden; der Kanal zeigt sie mit Buttons an.
         anfragen: list[FreigabeAnfrage] = []
+        wahl = waehle_modell(nachricht, user, self._vorgaben.hole(user.nutzer_id))
+        stand = await self._freigaben.stand(user)
         try:
-            text = await self._schleife(messages, user, anfragen, await self._freigaben.stand(user))
+            try:
+                text = await self._schleife(list(messages), user, anfragen, stand, wahl)
+            except _Eskalation as exc:
+                # Einmal mit dem Standardmodell wiederholen. Die Kosten beider Läufe sind
+                # gebucht; Freigaben gab es im ersten Lauf noch keine.
+                log.info("Eskalation von einfach auf standard: %s", exc.grund)
+                wahl = Modellwahl(STANDARD, f"standard: eskaliert von einfach ({exc.grund})")
+                text = await self._schleife(list(messages), user, anfragen, stand, wahl)
         except anthropic.APIError:
             log.exception("Claude-Aufruf fehlgeschlagen")
             return Antwort(text=DIENST_FEHLER_TEXT, freigaben=tuple(anfragen))
@@ -108,12 +131,16 @@ class Agent:
         user: NutzerKontext,
         anfragen: list[FreigabeAnfrage],
         freigaben_stand: str = "",
+        wahl: Modellwahl | None = None,
     ) -> str:
         settings = self._settings
+        wahl = wahl or Modellwahl(STANDARD, "")
+        stufe, grund = wahl.stufe, wahl.grund
         anfrage = {
-            "model": settings.model_default,
+            "model": settings.modell(stufe),
             "max_tokens": settings.max_output_tokens,
-            "system": baue_system_prompt(
+            # Fester Teil mit Cache-Marke, danach der persönliche Teil.
+            "system": system_bloecke(
                 datetime.now(_zone(user, settings.tz)),
                 freigaben_stand,
                 user,
@@ -121,24 +148,44 @@ class Agent:
             ),
         }
         if tools := self._registry.api_definitionen(user):
-            anfrage["tools"] = tools
+            # Die Tool-Liste ist je Rechte-Kombination gleich und stabil sortiert; die Marke am
+            # letzten Tool legt sie in den Prompt-Cache.
+            anfrage["tools"] = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
+
+        def eskaliere(warum: str) -> None:
+            """Nur das einfache Modell eskaliert, und nur solange noch nichts vorbereitet ist."""
+            if stufe == EINFACH and not anfragen:
+                raise _Eskalation(warum)
+
         tool_aufrufe = 0
         letztes_tool = ""
         zwischenstand = ""
         teile: list[str] = []
         tool_abgeschnitten = False
         for runde in range(1, settings.agent_max_rounds + 1):
-            response = await self._client.messages.create(**anfrage, messages=messages)
-            await self._kosten.verbuche(user, modell=anfrage["model"], **_tokens(response.usage))
+            response = await self._rufe(anfrage, messages)
+            await self._kosten.verbuche(
+                user, modell=anfrage["model"], grund=grund, **_tokens(response.usage)
+            )
             text = _text(response)
             if response.stop_reason == "tool_use":
                 tool_abgeschnitten = False
                 zwischenstand = text or zwischenstand
+                bloecke = [block for block in response.content if block.type == "tool_use"]
+                for block in bloecke:
+                    tool = self._registry.hole(block.name)
+                    if tool is None or not _eingabe_gueltig(tool, block.input):
+                        eskaliere("ungültiger Tool-Aufruf")
+                    elif tool.ist_schreibend(block.input):
+                        # Änderungen bereitet nicht das einfache Modell vor.
+                        eskaliere("schreibendes Tool")
+                    if tool is not None and tool.komplex and stufe != KOMPLEX:
+                        # Dieses Tool braucht das starke Modell; ab hier läuft es weiter.
+                        stufe, grund = KOMPLEX, f"komplex: Tool {tool.name}"
+                        anfrage["model"] = settings.modell(KOMPLEX)
                 messages.append({"role": "assistant", "content": response.content})
                 ergebnisse = []
-                for block in response.content:
-                    if block.type != "tool_use":
-                        continue
+                for block in bloecke:
                     tool_aufrufe += 1
                     letztes_tool = block.name
                     ergebnis = await self._bearbeite_tool_anfrage(
@@ -167,6 +214,7 @@ class Agent:
                         runde,
                         settings.max_output_tokens,
                     )
+                    eskaliere("Tool-Aufruf abgeschnitten")
                     if tool_abgeschnitten:
                         return TOOL_ZU_LANG_TEXT.format(limit=settings.max_output_tokens)
                     tool_abgeschnitten = True
@@ -184,6 +232,7 @@ class Agent:
             if not gesamt:
                 if anfragen:
                     return NUR_FREIGABE_TEXT
+                eskaliere("leere Antwort")
                 # Wirklich kein Text: festhalten, wie es dazu kam.
                 log.warning(
                     "Leere Antwort von Claude: stop_reason=%s, Runden=%s, Tool-Aufrufe=%s, "
@@ -206,6 +255,27 @@ class Agent:
         return _rundenlimit_text(
             settings.agent_max_rounds, tool_aufrufe, letztes_tool, zwischenstand, len(anfragen)
         )
+
+    async def _rufe(self, anfrage: dict, messages: list[dict]) -> anthropic.types.Message:
+        """Ruft Claude auf. Meldet die API das Modell als nicht verfügbar, fällt der Bot auf
+        das Standardmodell zurück und merkt sich das für die laufende Sitzung."""
+        standard = self._settings.modell(STANDARD)
+        if anfrage["model"] in self._nicht_verfuegbar:
+            anfrage["model"] = standard
+        try:
+            return await self._client.messages.create(**anfrage, messages=messages)
+        except (anthropic.NotFoundError, anthropic.PermissionDeniedError) as exc:
+            if anfrage["model"] == standard:
+                raise
+            log.warning(
+                "Modell %s ist nicht verfügbar (%s); Rückfall auf %s",
+                anfrage["model"],
+                type(exc).__name__,
+                standard,
+            )
+            self._nicht_verfuegbar.add(anfrage["model"])
+            anfrage["model"] = standard
+            return await self._client.messages.create(**anfrage, messages=messages)
 
     async def _bearbeite_tool_anfrage(
         self, name: str, params: dict, user: NutzerKontext, anfragen: list[FreigabeAnfrage]
@@ -297,6 +367,12 @@ def _tokens(usage: anthropic.types.Usage) -> dict[str, int]:
         "cache_lese_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
         "cache_schreib_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
     }
+
+
+def _eingabe_gueltig(tool: BasisTool, eingabe: object) -> bool:
+    """Grobe Prüfung eines Tool-Aufrufs: ein Objekt mit allen Pflichtfeldern."""
+    pflicht = tool.parameter_schema.get("required", [])
+    return isinstance(eingabe, dict) and all(feld in eingabe for feld in pflicht)
 
 
 def _text(response: anthropic.types.Message) -> str:

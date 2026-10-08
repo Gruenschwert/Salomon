@@ -6,6 +6,7 @@ import anthropic
 
 from app import __version__
 from app.agent.loop import Agent
+from app.agent.router import ModellVorgaben
 from app.auth.approvals import Freigaben
 from app.auth.users import uebernehme_bestand
 from app.auth.zugaenge import Zugaenge, uebernehme_asana_token
@@ -47,7 +48,8 @@ def main() -> None:
     alarme = Alarme(session_fabrik)
     kosten = Kosten(settings, session_fabrik, alarme)
     freigaben = Freigaben(kontext, registry)
-    agent = Agent(settings, session_fabrik, client, registry, freigaben, kosten)
+    vorgaben = ModellVorgaben()
+    agent = Agent(settings, session_fabrik, client, registry, freigaben, kosten, vorgaben)
 
     async def beim_start() -> None:
         await db_check(engine)
@@ -69,7 +71,7 @@ def main() -> None:
         kosten=kosten,
         alarme=alarme,
         beim_start=beim_start,
-        befehle=Befehle(session_fabrik, Zugaenge(kontext), kosten),
+        befehle=Befehle(session_fabrik, Zugaenge(kontext), kosten, vorgaben),
     )
     alarme.verbinde(kanal.sende_antwort)
     kontext.dateien.verbinde(kanal.lade_datei)
