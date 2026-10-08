@@ -13,6 +13,9 @@ from app.tools.base import ToolFehler
 from app.tools.registry import fuehre_tool_aus, lade_registry
 from tests.asana_fake import ASANA_TOKEN, FakeAsana, asana_kontext
 
+# Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
+pytestmark = pytest.mark.usefixtures("als_nutzer")
+
 LESE_TOOLS = [
     "asana_abschnitte_anzeigen",
     "asana_aufgabe_details",

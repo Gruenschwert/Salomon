@@ -13,6 +13,9 @@ from tests.asana_fake import FakeAsana, asana_kontext
 from tests.conftest import ADMIN_ID
 from tests.test_asana_schreiben import aufgabe
 
+# Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
+pytestmark = pytest.mark.usefixtures("als_nutzer")
+
 NAME = "asana_aenderungen_ausfuehren"
 SCHREIBEND = ("POST", "PUT", "DELETE")
 

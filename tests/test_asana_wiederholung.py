@@ -10,6 +10,9 @@ from app.tools.base import ToolFehler
 from app.tools.registry import lade_registry
 from tests.asana_fake import FakeAsana, asana_kontext
 
+# Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
+pytestmark = pytest.mark.usefixtures("als_nutzer")
+
 NAME = "asana_aenderungen_ausfuehren"
 # So könnte Asana eine von Hand eingerichtete Wiederholung liefern. Der Aufbau ist bewusst
 # ungewöhnlich: Das Tool darf nichts davon kennen, verändern oder weglassen.

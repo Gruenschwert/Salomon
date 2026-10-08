@@ -93,3 +93,15 @@ async def aktive_admins(session_fabrik: SessionFabrik) -> list[User]:
             )
         )
         return list(ergebnis)
+
+
+async def merker_gesetzt(session_fabrik: SessionFabrik, schluessel: str) -> bool:
+    async with session_fabrik() as session:
+        return await session.get(SystemEinstellung, schluessel) is not None
+
+
+async def setze_merker(session_fabrik: SessionFabrik, schluessel: str, wert: str = "ja") -> None:
+    async with session_fabrik() as session:
+        if await session.get(SystemEinstellung, schluessel) is None:
+            session.add(SystemEinstellung(schluessel=schluessel, wert=wert))
+            await session.commit()

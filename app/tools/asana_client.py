@@ -7,7 +7,9 @@ from typing import Any, Self
 
 import httpx
 
-from app.tools.base import ToolFehler, ToolKontext
+from app.auth.tresor import Tresor, TresorFehler, lade_geheimnis
+from app.config import Settings
+from app.tools.base import ToolFehler, ToolKontext, aktueller_nutzer
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +23,13 @@ MAX_EINTRAEGE = 30
 MAX_FEHLERTEXT_ZEICHEN = 200
 MASKIERT = "***"
 
-NICHT_KONFIGURIERT_TEXT = "Asana ist nicht konfiguriert (ASANA_TOKEN fehlt)."
+DIENST = "asana"
+NICHT_VERBUNDEN_TEXT = "Verbinde zuerst deinen Asana-Zugang mit /verbinden asana."
+KEIN_SCHLUESSEL_TEXT = (
+    "Persönliche Asana-Zugänge sind auf dem Server noch nicht eingerichtet "
+    "(SECRETS_MASTER_KEY fehlt). Bitte sprich den Admin an."
+)
+NICHT_KONFIGURIERT_TEXT = NICHT_VERBUNDEN_TEXT
 ZUGRIFF_VERWEIGERT_TEXT = "Asana-Zugriff verweigert."
 # 402 und 403 kommen auch dann, wenn eine Funktion im Tarif fehlt (Felder, Zeiterfassung,
 # Portfolios, Ziele, Startzeiten). Asana unterscheidet das nicht zuverlässig.
@@ -49,27 +57,87 @@ class AsanaFehler(ToolFehler):
         self.status = status
 
 
+def erster_admin(settings: Settings) -> int | None:
+    """Die Telegram-ID, der der bisherige gemeinsame ASANA_TOKEN aus der .env gehört."""
+    return min(settings.telegram_admin_user_ids, default=None)
+
+
+async def lade_asana_token(kontext: ToolKontext, nutzer: object) -> str:
+    """Der persönliche Asana-Token der Person. Es gibt keinen gemeinsamen Token als Rückfall.
+
+    Einzige Ausnahme, damit die alte Funktion ohne Handgriff weiterläuft: Solange auf dem
+    Server kein SECRETS_MASTER_KEY gesetzt ist, gehört der ASANA_TOKEN aus der .env weiter dem
+    bisherigen Admin und nur ihm.
+    """
+    settings = kontext.settings
+    try:
+        tresor = Tresor.aus_settings(settings)
+        if tresor.verfuegbar:
+            token = await lade_geheimnis(kontext.session_fabrik, tresor, nutzer, DIENST)
+            if token:
+                return token
+            raise AsanaFehler(NICHT_VERBUNDEN_TEXT)
+    except TresorFehler as exc:
+        raise AsanaFehler(f"Asana-Zugang nicht lesbar: {exc}") from None
+    alter_token = settings.asana_token.get_secret_value().strip()
+    if alter_token and getattr(nutzer, "telegram_id", None) == erster_admin(settings):
+        return alter_token
+    raise AsanaFehler(KEIN_SCHLUESSEL_TEXT)
+
+
+class _Sitzung:
+    """Offene Verbindung einer Person samt ihrem Token. Lebt nur während eines Tool-Aufrufs."""
+
+    def __init__(self, http: httpx.AsyncClient, token: str) -> None:
+        self.http = http
+        self.token = token
+        self.tiefe = 0
+
+
 class AsanaClient:
-    """Lebt so lange wie das Tool. `async with` hält die Verbindung über mehrere Aufrufe offen."""
+    """Lebt so lange wie das Tool. `async with` hält die Verbindung über mehrere Aufrufe offen.
+
+    Jede Person hat ihre eigene Verbindung mit ihrem eigenen Token. Der Token wird erst beim
+    Öffnen entschlüsselt und mit dem Schließen wieder verworfen.
+    """
 
     def __init__(self, kontext: ToolKontext, schlaf: Schlaf = asyncio.sleep) -> None:
         self._kontext = kontext
         self._schlaf = schlaf
-        self._http: httpx.AsyncClient | None = None
-        self._tiefe = 0
-        self._workspace_gid: str | None = None
+        # Nutzer-ID -> offene Verbindung. Zwei Personen teilen nie eine Verbindung.
+        self._sitzungen: dict[int, _Sitzung] = {}
+        self._workspace_gids: dict[int, str] = {}
+
+    @staticmethod
+    def _nutzer() -> object:
+        nutzer = aktueller_nutzer.get(None)
+        if nutzer is None:
+            raise AsanaFehler(NICHT_VERBUNDEN_TEXT)
+        return nutzer
+
+    @property
+    def _http(self) -> httpx.AsyncClient | None:
+        nutzer = aktueller_nutzer.get(None)
+        sitzung = self._sitzungen.get(nutzer.nutzer_id) if nutzer is not None else None
+        return sitzung.http if sitzung else None
 
     async def __aenter__(self) -> Self:
-        if self._tiefe == 0:
-            self._http = self._neuer_http_client()
-        self._tiefe += 1
+        nutzer = self._nutzer()
+        sitzung = self._sitzungen.get(nutzer.nutzer_id)
+        if sitzung is None:
+            token = await lade_asana_token(self._kontext, nutzer)
+            sitzung = _Sitzung(self._neuer_http_client(token), token)
+            self._sitzungen[nutzer.nutzer_id] = sitzung
+        sitzung.tiefe += 1
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        self._tiefe -= 1
-        if self._tiefe == 0 and self._http is not None:
-            await self._http.aclose()
-            self._http = None
+        nutzer = self._nutzer()
+        sitzung = self._sitzungen[nutzer.nutzer_id]
+        sitzung.tiefe -= 1
+        if sitzung.tiefe == 0:
+            del self._sitzungen[nutzer.nutzer_id]
+            await sitzung.http.aclose()
 
     async def get(self, pfad: str, params: dict | None = None, felder: Sequence[str] = ()) -> Any:
         return (await self._anfrage("GET", pfad, _mit_feldern(params, felder)))["data"]
@@ -136,7 +204,8 @@ class AsanaClient:
         """Der konfigurierte Workspace oder der einzige, den der Token sieht."""
         if konfiguriert := self._kontext.settings.asana_workspace_gid.strip():
             return konfiguriert
-        if self._workspace_gid is None:
+        nutzer_id = self._nutzer().nutzer_id
+        if nutzer_id not in self._workspace_gids:
             workspaces, _ = await self.liste("/workspaces", felder=("name",), max_eintraege=20)
             if not workspaces:
                 raise AsanaFehler("Der Asana-Token sieht keinen Workspace.")
@@ -146,21 +215,15 @@ class AsanaClient:
                     "Der Asana-Token sieht mehrere Workspaces. Bitte einen in "
                     f"ASANA_WORKSPACE_GID eintragen: {auswahl}"
                 )
-            self._workspace_gid = workspaces[0]["gid"]
-        return self._workspace_gid
+            self._workspace_gids[nutzer_id] = workspaces[0]["gid"]
+        return self._workspace_gids[nutzer_id]
 
-    def _token(self) -> str:
-        token = self._kontext.settings.asana_token.get_secret_value().strip()
-        if not token:
-            raise AsanaFehler(NICHT_KONFIGURIERT_TEXT)
-        return token
-
-    def _neuer_http_client(self) -> httpx.AsyncClient:
+    def _neuer_http_client(self, token: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=BASIS_URL,
             timeout=TIMEOUT_SEKUNDEN,
             transport=self._kontext.http_transport,
-            headers={"Authorization": f"Bearer {self._token()}"},
+            headers={"Authorization": f"Bearer {token}"},
         )
 
     async def _anfrage(
@@ -229,7 +292,10 @@ class AsanaClient:
         fehler = inhalt.get("errors") if isinstance(inhalt, dict) else None
         meldungen = [str(f.get("message", "")) for f in fehler or [] if isinstance(f, dict)]
         text = "; ".join(m for m in meldungen if m) or "ohne Begründung"
-        return text.replace(self._token(), MASKIERT)[:MAX_FEHLERTEXT_ZEICHEN]
+        sitzung = self._sitzungen.get(self._nutzer().nutzer_id)
+        if sitzung is not None:
+            text = text.replace(sitzung.token, MASKIERT)
+        return text[:MAX_FEHLERTEXT_ZEICHEN]
 
 
 def pruefe_gid(wert: object, feld: str = "gid") -> str:
@@ -300,3 +366,28 @@ async def lade_herunter(kontext: ToolKontext, url: str, max_bytes: int) -> bytes
         log.warning("Download nicht möglich: %s", type(exc).__name__)
         raise AsanaFehler("Die Datei konnte nicht heruntergeladen werden.") from None
     return bytes(daten)
+
+
+async def pruefe_token(kontext: ToolKontext, token: str) -> str:
+    """Testet einen Asana-Token mit GET /users/me und liefert den Namen des Kontos.
+
+    Der Token steht dabei nur im Authorization-Header dieser einen Anfrage.
+    """
+    try:
+        async with httpx.AsyncClient(
+            base_url=BASIS_URL,
+            timeout=TIMEOUT_SEKUNDEN,
+            transport=kontext.http_transport,
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            antwort = await client.get("/users/me", params={"opt_fields": "name"})
+    except httpx.HTTPError as exc:
+        log.warning("Asana-Token konnte nicht geprüft werden: %s", type(exc).__name__)
+        raise AsanaFehler(NICHT_ERREICHBAR_TEXT) from None
+    if antwort.status_code in (401, 403):
+        raise AsanaFehler("Asana lehnt diesen Token ab.", status=antwort.status_code)
+    if antwort.status_code != 200:
+        raise AsanaFehler(
+            f"Asana antwortet mit Status {antwort.status_code}.", status=antwort.status_code
+        )
+    return str((antwort.json().get("data") or {}).get("name") or "")

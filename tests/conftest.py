@@ -13,19 +13,22 @@ from sqlalchemy.pool import NullPool
 import tests.beispiel_tools
 from app.agent.loop import Agent
 from app.auth.approvals import Freigaben
+from app.auth.tresor import Tresor, speichere_geheimnis
 from app.auth.users import finde_erlaubten_nutzer, uebernehme_bestand
 from app.config import Settings
 from app.db.models import Base
 from app.db.session import erstelle_engine, erstelle_session_fabrik
 from app.observability.alerts import Alarme
 from app.observability.costs import Kosten
-from app.tools.base import ToolKontext
+from app.tools.base import ToolKontext, aktueller_nutzer
 from app.tools.registry import lade_registry
 from tests.beispiel_tools.schreibend import BeispielSchreiben
 
 ERLAUBT_ID = 111
 ADMIN_ID = 222
 FREMD_ID = 999
+# 32 Byte, nur für Tests
+TEST_HAUPTSCHLUESSEL = "dGVzdC1oYXVwdHNjaGx1ZXNzZWwtMzItYnl0ZXMtISE="
 # Tabellen mit festen Stammdaten aus der Migration bleiben zwischen den Tests stehen.
 _STAMMDATEN = {"roles", "alembic_version"}
 
@@ -127,6 +130,7 @@ def settings() -> Settings:
         price_input_usd_per_mtok="2",
         price_output_usd_per_mtok="10",
         usd_eur_rate="0.5",
+        secrets_master_key=TEST_HAUPTSCHLUESSEL,
     )
 
 
@@ -150,6 +154,27 @@ async def user(settings, session_fabrik):
 @pytest.fixture
 async def admin(user, session_fabrik):
     return await finde_erlaubten_nutzer(session_fabrik, ADMIN_ID)
+
+
+@pytest.fixture
+async def asana_verbunden(settings, session_fabrik, user, admin) -> None:
+    """Mitarbeiter und Admin haben je ihren eigenen Asana-Zugang verbunden."""
+    from tests.asana_fake import ASANA_TOKEN
+
+    tresor = Tresor.aus_settings(settings)
+    for nutzer in (user, admin):
+        await speichere_geheimnis(session_fabrik, tresor, nutzer, "asana", ASANA_TOKEN)
+
+
+@pytest.fixture
+def als_nutzer(user, asana_verbunden):
+    """Tests, die ein Tool direkt aufrufen, handeln als der Mitarbeiter.
+
+    Im Betrieb setzt der Agent-Code diesen Kontext bei jedem Tool-Aufruf.
+    """
+    marke = aktueller_nutzer.set(user)
+    yield user
+    aktueller_nutzer.reset(marke)
 
 
 @pytest.fixture

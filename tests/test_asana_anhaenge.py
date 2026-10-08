@@ -20,6 +20,9 @@ from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_bloc
 from tests.test_asana_schreiben import aufgabe
 from tests.test_fotos import JPEG, FakeFoto
 
+# Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
+pytestmark = pytest.mark.usefixtures("als_nutzer")
+
 NAME = "asana_aenderungen_ausfuehren"
 CHAT_ID = 5
 PDF = b"%PDF-1.7\n" + b"vertragsinhalt" * 40

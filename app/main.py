@@ -8,6 +8,8 @@ from app import __version__
 from app.agent.loop import Agent
 from app.auth.approvals import Freigaben
 from app.auth.users import uebernehme_bestand
+from app.auth.zugaenge import Zugaenge, uebernehme_asana_token
+from app.channels.befehle import Befehle
 from app.channels.telegram import TelegramKanal
 from app.config import Settings, get_settings
 from app.db.session import db_check, erstelle_engine, erstelle_session_fabrik
@@ -50,6 +52,7 @@ def main() -> None:
     async def beim_start() -> None:
         await db_check(engine)
         await uebernehme_bestand(session_fabrik, settings)
+        await uebernehme_asana_token(kontext)
         log.info("gs-assistant %s gestartet", __version__)
         await alarme.melde(f"✅ gs-assistant {__version__} wurde gestartet.")
         if settings.max_output_tokens < MIN_OUTPUT_TOKENS_EMPFOHLEN:
@@ -66,6 +69,7 @@ def main() -> None:
         kosten=kosten,
         alarme=alarme,
         beim_start=beim_start,
+        befehle=Befehle(session_fabrik, Zugaenge(kontext)),
     )
     alarme.verbinde(kanal.sende_antwort)
     kontext.dateien.verbinde(kanal.lade_datei)

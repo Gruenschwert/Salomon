@@ -3,8 +3,8 @@ import logging
 
 import httpx
 import pytest
-from pydantic import SecretStr
 
+from app.auth.tresor import loesche_geheimnis
 from app.tools.asana_client import (
     LIMIT_TEXT,
     MAX_WIEDERHOLUNGEN,
@@ -19,6 +19,9 @@ from app.tools.asana_client import (
     kuerze_text,
 )
 from tests.asana_fake import ASANA_TOKEN, FakeAsana, asana_kontext
+
+# Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
+pytestmark = pytest.mark.usefixtures("als_nutzer")
 
 
 @pytest.fixture
@@ -180,10 +183,14 @@ async def test_token_steht_in_keiner_log_ausgabe(baue_client, fake, caplog):
     assert ASANA_TOKEN not in caplog.text
 
 
-async def test_ohne_token_wird_nichts_gesendet(baue_client, fake):
-    with pytest.raises(AsanaFehler, match="nicht konfiguriert"):
-        await baue_client(asana_token=SecretStr("")).get("/tasks/1")
-    assert NICHT_KONFIGURIERT_TEXT.startswith("Asana ist nicht konfiguriert")
+async def test_ohne_verbundenen_zugang_wird_nichts_gesendet(
+    baue_client, fake, user, session_fabrik
+):
+    await loesche_geheimnis(session_fabrik, user, "asana")
+    with pytest.raises(AsanaFehler) as fehler:
+        await baue_client().get("/tasks/1")
+    assert str(fehler.value) == "Verbinde zuerst deinen Asana-Zugang mit /verbinden asana."
+    assert NICHT_KONFIGURIERT_TEXT == str(fehler.value)
     assert fake.anfragen == []
 
 

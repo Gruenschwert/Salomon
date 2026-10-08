@@ -30,6 +30,7 @@ from app.channels.base import (
     FreigabeAnfrage,
     NachrichtenHandler,
 )
+from app.channels.befehle import Befehle
 from app.config import Settings
 from app.db.models import TelegramDatei
 from app.db.session import SessionFabrik, db_sitzung
@@ -95,6 +96,7 @@ class TelegramKanal:
         kosten: Kosten,
         alarme: Alarme,
         beim_start: Callable[[], Awaitable[None]] | None = None,
+        befehle: Befehle | None = None,
     ) -> None:
         self._settings = settings
         self._session_fabrik = session_fabrik
@@ -103,6 +105,7 @@ class TelegramKanal:
         self._kosten = kosten
         self._alarme = alarme
         self._beim_start = beim_start
+        self.befehle = befehle or Befehle(session_fabrik)
         self._gestartet = time.monotonic()
         self._geheimnisse = sammle_geheimnisse(settings)
         self._alben: dict[tuple[int, str], _Album] = {}
@@ -114,6 +117,7 @@ class TelegramKanal:
             .build()
         )
         self.application.add_handler(CommandHandler("status", self._bei_status))
+        self.application.add_handler(CommandHandler(self.befehle.namen(), self._bei_befehl))
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._bei_nachricht)
         )
@@ -263,8 +267,65 @@ class TelegramKanal:
         # Nur der Typ der Ausnahme: Meldungstexte können interne Details enthalten.
         await self._alarme.melde(f"⚠️ Unbehandelter Fehler ({wo}): {type(exc).__name__}")
 
+    async def _bei_befehl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Slash-Befehle laufen direkt hier und nie über das Modell."""
+        if update.effective_user is None or update.effective_chat is None:
+            return
+        chat = update.effective_chat
+        absender = update.effective_user
+        nutzer = await self._erlaubter_nutzer(absender.id, absender.full_name)
+        if nutzer is None:
+            return
+        # Ein neuer Befehl bricht ein laufendes /verbinden ab.
+        self.befehle.brich_ab(chat.id, absender.id)
+        teile = (update.effective_message.text or "").split()
+        name = teile[0].lstrip("/").split("@")[0].lower() if teile else ""
+        try:
+            text = await self.befehle.fuehre_aus(
+                name, nutzer, teile[1:], chat.id, getattr(chat, "type", "private") == "private"
+            )
+        except Exception as exc:
+            log.exception("Unbehandelter Fehler im Befehl /%s", name)
+            await self.sende_antwort(chat.id, FEHLER_TEXT)
+            await self._melde_fehler(f"Befehl /{name}", exc)
+            return
+        await self.sende_antwort(chat.id, text)
+
+    async def _bei_geheimnis(self, update: Update, nutzer) -> None:
+        """Die Nachricht nach /verbinden: sofort aus dem Chat löschen, nie speichern, nie
+        loggen, nie an das Modell geben."""
+        chat_id = update.effective_chat.id
+        nachricht = update.effective_message
+        geheimnis = nachricht.text or ""
+        geloescht = True
+        try:
+            await self.application.bot.delete_message(
+                chat_id=chat_id, message_id=nachricht.message_id
+            )
+        except Exception as exc:
+            geloescht = False
+            log.warning("Nachricht mit Zugangsdaten nicht löschbar: %s", type(exc).__name__)
+        try:
+            text = await self.befehle.nimm_geheimnis(nutzer, chat_id, geheimnis)
+        except Exception as exc:
+            # Nur der Typ: Die Meldung könnte das Geheimnis enthalten.
+            log.error("Fehler beim Verbinden eines Zugangs: %s", type(exc).__name__)
+            text = FEHLER_TEXT
+        if not geloescht:
+            text += (
+                "\nIch konnte deine Nachricht mit dem Token nicht löschen. Bitte lösche sie selbst."
+            )
+        else:
+            text += "\nDeine Nachricht mit dem Token habe ich aus dem Chat gelöscht."
+        await self.sende_antwort(chat_id, text)
+
     async def _bei_nachricht(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or update.effective_chat is None:
+            return
+        if self.befehle.erwartet_geheimnis(update.effective_chat.id, update.effective_user.id):
+            nutzer = await self._erlaubter_nutzer(update.effective_user.id)
+            if nutzer is not None:
+                await self._bei_geheimnis(update, nutzer)
             return
         nachricht = EingehendeNachricht(
             chat_id=update.effective_chat.id,

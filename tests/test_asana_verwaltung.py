@@ -9,6 +9,9 @@ from app.tools.registry import lade_registry
 from tests.asana_fake import FakeAsana, asana_kontext
 from tests.test_asana_schreiben import aufgabe
 
+# Jeder Test handelt als Mitarbeiter mit eigenem, verbundenem Asana-Zugang.
+pytestmark = pytest.mark.usefixtures("als_nutzer")
+
 NAME = "asana_aenderungen_ausfuehren"
 LOESCHUNGEN = [
     {"operation": "zeit_loeschen", "zeiteintrag_gid": "71"},

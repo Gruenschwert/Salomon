@@ -49,7 +49,13 @@ class Settings(BaseSettings):
     shopify_kiffkraut_token: SecretStr = SecretStr("")
     shopify_api_version: str = ""
 
-    # Asana
+    # Verschlüsselung der Zugangsdaten je Person (Base64, 32 Byte). Leer: /verbinden ist aus.
+    secrets_master_key: SecretStr = SecretStr("")
+    secrets_master_key_version: int = 1
+    # Nur während einer Rotation: der vorherige Schlüssel
+    secrets_master_key_alt: SecretStr = SecretStr("")
+
+    # Asana. ASANA_TOKEN dient nur noch der einmaligen Übernahme in das Konto des Admins.
     asana_token: SecretStr = SecretStr("")
     asana_workspace_gid: str = ""
     asana_default_team_gid: str = ""
