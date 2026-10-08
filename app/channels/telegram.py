@@ -31,6 +31,7 @@ from app.channels.base import (
     NachrichtenHandler,
 )
 from app.channels.befehle import Befehle
+from app.channels.rundnachricht import an_rolle_senden
 from app.config import Settings
 from app.db.models import TelegramDatei
 from app.db.session import SessionFabrik, db_sitzung
@@ -49,6 +50,7 @@ TEIL_MAX_ZEICHEN = 3800
 TEXT_MAX_ZEICHEN = 20000
 MAX_GRUND_ZEICHEN = 200
 KLICK_PRAEFIX = "freigabe"
+ADMIN_PRAEFIX = "admin"
 KLICK_JA = "ja"
 KLICK_NEIN = "nein"
 KLICK_LOESCHEN = "loeschen"
@@ -125,6 +127,9 @@ class TelegramKanal:
         self.application.add_handler(MessageHandler(filters.Document.ALL, self._bei_foto))
         self.application.add_handler(
             CallbackQueryHandler(self._bei_klick, pattern=rf"^{KLICK_PRAEFIX}:\d+:\w+$")
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self._bei_admin_klick, pattern=rf"^{ADMIN_PRAEFIX}:[0-9a-f]+:\w+$")
         )
         self.application.add_error_handler(self._bei_fehler)
 
@@ -240,7 +245,7 @@ class TelegramKanal:
         user = await self._erlaubter_nutzer(telegram_id)
         if user is None:
             return None
-        if user.rolle != "admin":
+        if not user.ist_admin:
             return NUR_ADMIN_TEXT
         limit = self._settings.daily_cost_limit_eur
         return "\n".join(
@@ -281,7 +286,7 @@ class TelegramKanal:
         teile = (update.effective_message.text or "").split()
         name = teile[0].lstrip("/").split("@")[0].lower() if teile else ""
         try:
-            text = await self.befehle.fuehre_aus(
+            antwort = await self.befehle.fuehre_aus(
                 name, nutzer, teile[1:], chat.id, getattr(chat, "type", "private") == "private"
             )
         except Exception as exc:
@@ -289,7 +294,59 @@ class TelegramKanal:
             await self.sende_antwort(chat.id, FEHLER_TEXT)
             await self._melde_fehler(f"Befehl /{name}", exc)
             return
-        await self.sende_antwort(chat.id, text)
+        if antwort.aktion is None:
+            await self.sende_antwort(chat.id, antwort.text)
+            return
+        kennung = f"{ADMIN_PRAEFIX}:{antwort.aktion}"
+        await self.application.bot.send_message(
+            chat_id=chat.id,
+            text=antwort.text,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✅ Bestätigen", callback_data=f"{kennung}:{KLICK_JA}"
+                        ),
+                        InlineKeyboardButton(
+                            "❌ Abbrechen", callback_data=f"{kennung}:{KLICK_NEIN}"
+                        ),
+                    ]
+                ]
+            ),
+        )
+
+    async def _bei_admin_klick(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Bestätigung einer Admin-Aktion. Nur der Admin, der sie vorbereitet hat, zählt."""
+        query = update.callback_query
+        if query is None or query.data is None or update.effective_user is None:
+            return
+        nutzer = await self._erlaubter_nutzer(update.effective_user.id)
+        if nutzer is None:
+            return
+        _, kennung, wahl = query.data.split(":")
+        try:
+            text = await self.befehle.bestaetige(kennung, nutzer, wahl == KLICK_JA)
+        except Exception as exc:
+            log.exception("Unbehandelter Fehler bei einer Admin-Aktion")
+            await query.answer(FEHLER_TEXT, show_alert=True)
+            await self._melde_fehler("Admin-Aktion", exc)
+            return
+        if text is None:
+            await query.answer(
+                "Das kann nur bestätigen, wer den Befehl gegeben hat.", show_alert=True
+            )
+            return
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError as exc:
+            log.warning("Klick konnte nicht quittiert werden: %s", type(exc).__name__)
+        if update.effective_chat is not None:
+            await self.sende_antwort(update.effective_chat.id, text)
+
+    async def an_rolle_senden(self, rolle: str, text: str) -> int:
+        """Rundnachricht an alle aktiven Personen mit dieser Rolle."""
+        return await an_rolle_senden(self._session_fabrik, self.sende_antwort, rolle, text)
 
     async def _bei_geheimnis(self, update: Update, nutzer) -> None:
         """Die Nachricht nach /verbinden: sofort aus dem Chat löschen, nie speichern, nie

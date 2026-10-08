@@ -1,6 +1,7 @@
 """Allgemeiner API-Aufruf: Pfadprüfung, Sperrliste, Freigabe, zweite Bestätigung, Rollen."""
 
 import logging
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -423,7 +424,8 @@ async def test_delete_ohne_zweite_bestaetigung_wird_nicht_ausgefuehrt(
 
 async def test_delete_ohne_loesch_rolle_wird_abgelehnt(baue, user, admin, fake):
     # Der Nutzer darf den API-Aufruf, aber nicht löschen.
-    _, registry, freigaben = baue(asana_api_aufruf_roles=frozenset({"admin", "user"}))
+    _, registry, freigaben = baue()
+    user = replace(user, rechte=user.rechte | {"asana.api_aufruf"})
     tool = registry.hole(NAME)
     with pytest.raises(ToolFehler, match="darf in Asana nichts löschen"):
         await freigaben.anfragen(user, tool, _aufruf("DELETE", "/tags/41"))
@@ -446,8 +448,8 @@ async def test_nur_die_erlaubten_rollen_sehen_und_nutzen_das_tool(
     baue, user, admin, fake, session_fabrik, kosten
 ):
     akontext, registry, freigaben = baue()
-    assert NAME in {d["name"] for d in registry.api_definitionen("admin")}
-    assert NAME not in {d["name"] for d in registry.api_definitionen("user")}
+    assert NAME in {d["name"] for d in registry.api_definitionen(admin)}
+    assert NAME not in {d["name"] for d in registry.api_definitionen(user)}
 
     client = FakeAnthropic(
         claude_antwort(tool_use_block(NAME, _aufruf("GET", "/tasks/7"))),
@@ -461,7 +463,7 @@ async def test_nur_die_erlaubten_rollen_sehen_und_nutzen_das_tool(
     assert ergebnis["is_error"] is True
     assert fake.anfragen == []
     # Auch als Operation im Änderungssatz ist die Rolle gesperrt.
-    with pytest.raises(ToolFehler, match="api_aufruf ist dieser Rolle nicht erlaubt"):
+    with pytest.raises(ToolFehler, match="api_aufruf fehlt dir das Recht asana.api_aufruf"):
         await freigaben.anfragen(
             user,
             registry.hole(SATZ),
@@ -475,7 +477,7 @@ async def test_nur_die_erlaubten_rollen_sehen_und_nutzen_das_tool(
 
 async def test_abschalter_nimmt_das_tool_fuer_alle_weg(baue, admin, fake):
     akontext, registry, freigaben = baue(asana_api_aufruf_enabled=False)
-    assert NAME not in {d["name"] for d in registry.api_definitionen("admin")}
+    assert NAME not in {d["name"] for d in registry.api_definitionen(admin)}
     with pytest.raises(ToolFehler, match="abgeschaltet .ASANA_API_AUFRUF_ENABLED=false."):
         await freigaben.anfragen(
             admin,
@@ -491,6 +493,4 @@ async def test_abschalter_nimmt_das_tool_fuer_alle_weg(baue, admin, fake):
 
 def test_standardwerte_der_neuen_einstellungen(settings):
     assert settings.asana_api_aufruf_enabled is True
-    assert settings.asana_api_aufruf_roles == {"admin"}
-    assert settings.asana_team_verwaltung_roles == {"admin"}
     assert settings.asana_attachment_view_max_mb == 5

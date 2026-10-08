@@ -1,21 +1,59 @@
 """Slash-Befehle. Sie laufen direkt auf dem Server und nie über das Modell."""
 
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from app.auth.kontext import NutzerKontext
+from app.auth.rechte import ADMIN_NUTZER, RECHTE
+from app.auth.users import (
+    NutzerFehler,
+    aendere_rolle,
+    finde_nutzer,
+    lege_nutzer_an,
+    liste_nutzer,
+    setze_sperre,
+)
 from app.auth.zugaenge import DIENSTE, Zugaenge
+from app.db.models import ROLLEN
 from app.db.session import SessionFabrik
 from app.observability.audit import protokolliere
 from app.tools.base import ToolFehler
 
 # So lange wartet der Bot nach /verbinden auf die Nachricht mit dem Token.
 GEHEIMNIS_FRIST_SEKUNDEN = 600
+# So lange gilt der Bestätigungsbutton einer Admin-Aktion.
+AKTION_FRIST_SEKUNDEN = 300
+GRENZE_TEXT = (
+    "Zu deinen Daten: Dein Verlauf, deine Notizen und deine Zugänge gehören nur dir. Kein "
+    "anderer Nutzer und kein Admin kann sie über den Bot lesen; Zugangsdaten liegen "
+    "verschlüsselt in der Datenbank. Ehrliche Grenze: Wer Root-Zugriff auf den Server hat und "
+    "den Hauptschlüssel kennt, könnte technisch entschlüsseln."
+)
 NUR_PRIVAT_TEXT = (
     "Zugangsdaten nehme ich nur im privaten Chat mit mir an, nie in einer Gruppe. Schreib mir "
     "dort /verbinden."
 )
+
+
+@dataclass(frozen=True)
+class BefehlsAntwort:
+    text: str
+    # Kennung einer Aktion, die der Admin noch per Button bestätigen muss
+    aktion: str | None = None
+
+
+@dataclass
+class _Aktion:
+    """Eine vorbereitete Admin-Aktion, die auf die Bestätigung per Button wartet."""
+
+    telegram_id: int
+    befehl: str
+    beschreibung: str
+    parameter: dict
+    ausfuehren: Callable[[], Awaitable[None]]
+    gueltig_bis: float
 
 
 @dataclass(frozen=True)
@@ -36,14 +74,38 @@ class Befehle:
         # (Chat-ID, Telegram-ID) -> (Dienst, gültig bis). Die nächste Nachricht dieser Person
         # in diesem Chat ist dann ein Geheimnis und geht an niemanden sonst.
         self._erwartet: dict[tuple[int, int], tuple[str, float]] = {}
-        self._tabelle = {
-            befehl.name: befehl
-            for befehl in (
-                Befehl("verbinden", "eigenen Zugang zu einem Dienst verbinden", self._verbinden),
-                Befehl("trennen", "eigenen Zugang zu einem Dienst entfernen", self._trennen),
-                Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
-            )
-        }
+        self._aktionen: dict[str, _Aktion] = {}
+        self._tabelle: dict[str, Befehl] = {}
+        self.registriere(
+            Befehl("start", "Begrüßung", self._start),
+            Befehl("hilfe", "zeigt die Befehle, die du nutzen kannst", self._hilfe),
+            Befehl(
+                "verbinden", "eigenen Zugang verbinden, z. B. /verbinden asana", self._verbinden
+            ),
+            Befehl("trennen", "eigenen Zugang entfernen, z. B. /trennen asana", self._trennen),
+            Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
+            Befehl("nutzer", "Liste aller Personen mit Rollen", self._nutzer, ADMIN_NUTZER),
+            Befehl(
+                "nutzer_neu",
+                "Person anlegen: /nutzer_neu <telegram_id> <name>",
+                self._nutzer_neu,
+                ADMIN_NUTZER,
+            ),
+            Befehl(
+                "rolle",
+                "Rolle geben oder nehmen: /rolle <name> +buchhaltung",
+                self._rolle,
+                ADMIN_NUTZER,
+            ),
+            Befehl("sperren", "Person sperren: /sperren <name>", self._sperren, ADMIN_NUTZER),
+            Befehl(
+                "entsperren", "Sperre aufheben: /entsperren <name>", self._entsperren, ADMIN_NUTZER
+            ),
+        )
+
+    def registriere(self, *befehle: Befehl) -> None:
+        for befehl in befehle:
+            self._tabelle[befehl.name] = befehl
 
     def namen(self) -> list[str]:
         return list(self._tabelle)
@@ -53,7 +115,13 @@ class Befehle:
 
     async def fuehre_aus(
         self, name: str, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
-    ) -> str:
+    ) -> BefehlsAntwort:
+        ergebnis = await self._fuehre_aus(name, nutzer, argumente, chat_id, privat)
+        return ergebnis if isinstance(ergebnis, BefehlsAntwort) else BefehlsAntwort(ergebnis)
+
+    async def _fuehre_aus(
+        self, name: str, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
+    ) -> "str | BefehlsAntwort":
         befehl = self._tabelle.get(name)
         if befehl is None:
             return "Diesen Befehl kenne ich nicht. /hilfe zeigt, was geht."
@@ -68,8 +136,152 @@ class Befehle:
             return "Dafür fehlt dir das Recht. Die Rolle dafür kann ein Admin vergeben."
         try:
             return await befehl.funktion(nutzer, argumente, chat_id, privat)
-        except ToolFehler as exc:
+        except (ToolFehler, NutzerFehler) as exc:
             return str(exc)
+
+    # ---------------------------------------------------------------- Hilfe
+
+    async def _start(self, nutzer: NutzerKontext, *_: object) -> str:
+        name = f", {nutzer.anzeigename}" if nutzer.anzeigename else ""
+        return (
+            f"Hallo{name}! Ich bin der Assistent der Grünschwert GmbH. Schreib mir einfach, was "
+            "du brauchst. /hilfe zeigt die Befehle."
+        )
+
+    async def _hilfe(self, nutzer: NutzerKontext, *_: object) -> str:
+        """Nur die Befehle, die diese Person nutzen darf."""
+        zeilen = ["Befehle für dich:"]
+        zeilen += [f"/{b.name} – {b.beschreibung}" for b in self.erlaubte(nutzer)]
+        zeilen += ["", f"Deine Rollen: {', '.join(sorted(nutzer.rollen)) or 'keine'}", GRENZE_TEXT]
+        return "\n".join(zeilen)
+
+    # ---------------------------------------------------------------- Nutzerverwaltung
+
+    def _merke_aktion(
+        self,
+        nutzer: NutzerKontext,
+        befehl: str,
+        beschreibung: str,
+        parameter: dict,
+        ausfuehren: Callable[[], Awaitable[None]],
+    ) -> BefehlsAntwort:
+        kennung = secrets.token_hex(6)
+        self._aktionen[kennung] = _Aktion(
+            telegram_id=nutzer.telegram_id,
+            befehl=befehl,
+            beschreibung=beschreibung,
+            parameter=parameter,
+            ausfuehren=ausfuehren,
+            gueltig_bis=time.monotonic() + AKTION_FRIST_SEKUNDEN,
+        )
+        return BefehlsAntwort(f"Bitte bestätigen: {beschreibung}", aktion=kennung)
+
+    async def bestaetige(self, kennung: str, nutzer: NutzerKontext, ja: bool) -> str | None:
+        """Klick auf den Bestätigungsbutton. None: Der Klick stammt nicht vom Admin, der die
+        Aktion vorbereitet hat, und wird ignoriert."""
+        aktion = self._aktionen.get(kennung)
+        if aktion is None:
+            return "Diese Aktion gibt es nicht mehr."
+        if aktion.telegram_id != nutzer.telegram_id:
+            return None
+        del self._aktionen[kennung]
+        if time.monotonic() > aktion.gueltig_bis:
+            return "Die Bestätigung ist abgelaufen. Es wurde nichts geändert."
+        # Die Rechte werden beim Klick noch einmal geprüft.
+        if not nutzer.darf(ADMIN_NUTZER):
+            return "Dafür fehlt dir das Recht. Es wurde nichts geändert."
+        if not ja:
+            return f"Abgebrochen: {aktion.beschreibung}"
+        try:
+            await aktion.ausfuehren()
+        except NutzerFehler as exc:
+            await protokolliere(
+                self._session_fabrik,
+                user_id=nutzer.id,
+                tool_name=f"/{aktion.befehl}",
+                parameter=aktion.parameter,
+                fehler=str(exc),
+            )
+            return f"Das ging nicht: {exc}"
+        await protokolliere(
+            self._session_fabrik,
+            user_id=nutzer.id,
+            tool_name=f"/{aktion.befehl}",
+            parameter=aktion.parameter,
+            ergebnis_kurz="ausgeführt",
+        )
+        return f"✅ Erledigt: {aktion.beschreibung}"
+
+    async def _nutzer(self, nutzer: NutzerKontext, *_: object) -> str:
+        zeilen = ["Personen:"]
+        for person in await liste_nutzer(self._session_fabrik):
+            zustand = "gesperrt" if person.gesperrt or not person.aktiv else "aktiv"
+            zeilen.append(
+                f"- {person.anzeigename or '(ohne Namen)'}, Telegram-ID {person.telegram_id}, "
+                f"Rollen: {', '.join(person.rollen) or 'keine'}, {zustand}"
+            )
+        return "\n".join(zeilen)
+
+    async def _nutzer_neu(
+        self, nutzer: NutzerKontext, argumente: list[str], *_: object
+    ) -> "str | BefehlsAntwort":
+        if len(argumente) < 2 or not argumente[0].isdigit():
+            return "So geht es: /nutzer_neu <telegram_id> <name>"
+        telegram_id, name = int(argumente[0]), " ".join(argumente[1:])
+        return self._merke_aktion(
+            nutzer,
+            "nutzer_neu",
+            f"{name} (Telegram-ID {telegram_id}) als Mitarbeiter anlegen",
+            {"telegram_id": telegram_id},
+            lambda: lege_nutzer_an(self._session_fabrik, telegram_id, name, nutzer.id),
+        )
+
+    async def _rolle(
+        self, nutzer: NutzerKontext, argumente: list[str], *_: object
+    ) -> "str | BefehlsAntwort":
+        if len(argumente) < 2 or argumente[-1][:1] not in "+-" or len(argumente[-1]) < 2:
+            return (
+                "So geht es: /rolle <name> +buchhaltung oder /rolle <name> -buchhaltung. "
+                f"Rollen: {', '.join(ROLLEN)}"
+            )
+        hinzufuegen, rolle = argumente[-1][0] == "+", argumente[-1][1:].lower()
+        if rolle not in ROLLEN:
+            return f"Die Rolle „{rolle}“ gibt es nicht. Möglich: {', '.join(ROLLEN)}."
+        person = await finde_nutzer(self._session_fabrik, " ".join(argumente[:-1]))
+        verb = "bekommt" if hinzufuegen else "verliert"
+        return self._merke_aktion(
+            nutzer,
+            "rolle",
+            f"{person.anzeigename or person.telegram_id} {verb} die Rolle {rolle}",
+            {"telegram_id": person.telegram_id, "rolle": rolle, "hinzufuegen": hinzufuegen},
+            lambda: aendere_rolle(self._session_fabrik, person.id, rolle, hinzufuegen, nutzer.id),
+        )
+
+    async def _sperre(
+        self, nutzer: NutzerKontext, argumente: list[str], gesperrt: bool
+    ) -> "str | BefehlsAntwort":
+        befehl = "sperren" if gesperrt else "entsperren"
+        if not argumente:
+            return f"So geht es: /{befehl} <name>"
+        person = await finde_nutzer(self._session_fabrik, " ".join(argumente))
+        if gesperrt and person.telegram_id == nutzer.telegram_id:
+            return "Dich selbst kannst du nicht sperren."
+        name = person.anzeigename or str(person.telegram_id)
+        return self._merke_aktion(
+            nutzer,
+            befehl,
+            f"{name} sperren (ab sofort keine Antworten mehr)"
+            if gesperrt
+            else f"{name} entsperren",
+            {"telegram_id": person.telegram_id},
+            lambda: setze_sperre(self._session_fabrik, person.id, gesperrt),
+        )
+
+    async def _sperren(self, nutzer: NutzerKontext, argumente: list[str], *_: object):
+        return await self._sperre(nutzer, argumente, True)
+
+    async def _entsperren(self, nutzer: NutzerKontext, argumente: list[str], *_: object):
+        return await self._sperre(nutzer, argumente, False)
 
     # ---------------------------------------------------------------- Zugänge
 
@@ -165,3 +377,8 @@ class Befehle:
         if not dienste:
             return "Du hast noch keinen Dienst verbunden. Los geht es mit /verbinden asana."
         return "Verbunden: " + ", ".join(dienste) + ". Die Zugangsdaten selbst zeige ich nie an."
+
+
+def rechte_als_text(nutzer: NutzerKontext) -> str:
+    """Was die Person darf, in Worten (für Systemprompt und Hilfe)."""
+    return "; ".join(RECHTE[recht] for recht in sorted(nutzer.rechte) if recht in RECHTE)

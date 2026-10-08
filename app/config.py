@@ -8,7 +8,6 @@ from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 IdListe = Annotated[frozenset[int], NoDecode]
-RollenListe = Annotated[frozenset[str], NoDecode]
 
 
 class Settings(BaseSettings):
@@ -62,11 +61,8 @@ class Settings(BaseSettings):
     asana_max_ops_per_changeset: int = 100
     asana_max_deletes_per_changeset: int = 20
     asana_delete_enabled: bool = True
-    asana_delete_roles: RollenListe = frozenset({"admin"})
     asana_attachment_view_max_mb: float = 5
-    asana_team_verwaltung_roles: RollenListe = frozenset({"admin"})
     asana_api_aufruf_enabled: bool = True
-    asana_api_aufruf_roles: RollenListe = frozenset({"admin"})
 
     # Foto-Eingang
     photo_max_mb: float = 5
@@ -78,18 +74,6 @@ class Settings(BaseSettings):
     def _ids_aus_kommaliste(cls, wert: object) -> object:
         if isinstance(wert, str):
             return frozenset(int(teil) for teil in wert.split(",") if teil.strip())
-        return wert
-
-    @field_validator(
-        "asana_delete_roles",
-        "asana_team_verwaltung_roles",
-        "asana_api_aufruf_roles",
-        mode="before",
-    )
-    @classmethod
-    def _rollen_aus_kommaliste(cls, wert: object) -> object:
-        if isinstance(wert, str):
-            return frozenset(teil.strip() for teil in wert.split(",") if teil.strip())
         return wert
 
     @model_validator(mode="before")

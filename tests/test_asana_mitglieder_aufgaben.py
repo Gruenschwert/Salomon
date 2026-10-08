@@ -1,5 +1,7 @@
 """Mitglieder, Teams, Projekt-Einstellungen und die weiteren Aufgaben-Operationen."""
 
+from dataclasses import replace
+
 import pytest
 
 from app.auth.approvals import Freigaben
@@ -179,7 +181,7 @@ async def test_team_verwaltung_nur_fuer_die_erlaubten_rollen(baue, user, admin, 
         {"operation": "team_mitglied_hinzufuegen", "team_gid": "$m1", "nutzer": ["Lea", "Max"]},
         {"operation": "team_aendern", "team_gid": "77", "team_sichtbarkeit": "oeffentlich"},
     ]
-    with pytest.raises(ToolFehler, match="team_anlegen ist dieser Rolle nicht erlaubt"):
+    with pytest.raises(ToolFehler, match="team_anlegen fehlt dir das Recht asana.teams"):
         await _vorschau(baue(), user, anlegen)
     assert fake.aufrufe("POST") == []
 
@@ -197,9 +199,8 @@ async def test_team_verwaltung_nur_fuer_die_erlaubten_rollen(baue, user, admin, 
     # Je Nutzer ein Aufruf, wie es der Endpunkt verlangt.
     assert fake.koerper("POST", "/teams/88/addUser") == [{"user": "502"}, {"user": "501"}]
     assert fake.koerper("PUT", "/teams/77") == [{"visibility": "public"}]
-    # Mit freigeschalteter Rolle darf auch ein normaler Nutzer.
-    offen = baue(asana_team_verwaltung_roles=frozenset({"admin", "user"}))
-    await _vorschau(offen, user, anlegen[:1])
+    # Mit dem Recht asana.teams darf es auch jemand ohne Admin-Rolle.
+    await _vorschau(baue(), replace(user, rechte=user.rechte | {"asana.teams"}), anlegen[:1])
 
 
 async def test_team_mitglied_entfernen_zaehlt_als_loeschung(baue, user, admin, fake):

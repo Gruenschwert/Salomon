@@ -4,6 +4,7 @@ Sperrliste. Das Tool `asana_api_aufruf` (in asana_api.py) baut darauf auf."""
 import json
 import re
 
+from app.auth.rechte import ASANA_API_AUFRUF
 from app.config import Settings
 from app.tools.asana_operationen import (
     KATEGORIE_AENDERN,
@@ -20,7 +21,6 @@ from app.tools.base import ToolFehler
 
 METHODEN = ("GET", "POST", "PUT", "DELETE")
 SCHREIBENDE_METHODEN = ("POST", "PUT", "DELETE")
-ROLLEN_EINSTELLUNG = "asana_api_aufruf_roles"
 MAX_PFAD_ZEICHEN = 300
 MAX_BODY_VORSCHAU = 1500
 MAX_ERGEBNIS_ZEICHEN = 300
@@ -152,7 +152,7 @@ def _lesbar(wert: object, maximum: int) -> str:
     KATEGORIE_AENDERN,
     pflicht={"methode", "pfad", "begruendung"},
     optional={"abfrage", "body"},
-    rollen=ROLLEN_EINSTELLUNG,
+    recht=ASANA_API_AUFRUF,
 )
 class ApiAufruf:
     @staticmethod

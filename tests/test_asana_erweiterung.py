@@ -115,10 +115,10 @@ def test_loeschungen_und_rollen_sind_richtig_zugeordnet():
     for art in NEUE_OPERATIONEN - LOESCHUNGEN:
         assert OP_TYPEN[art].kategorie != KATEGORIE_LOESCHEN, art
     for art in TEAM_OPERATIONEN:
-        assert OP_TYPEN[art].rollen == "asana_team_verwaltung_roles", art
-    assert OP_TYPEN["api_aufruf"].rollen == "asana_api_aufruf_roles"
+        assert OP_TYPEN[art].recht == "asana.teams", art
+    assert OP_TYPEN["api_aufruf"].recht == "asana.api_aufruf"
     andere = NEUE_OPERATIONEN - TEAM_OPERATIONEN - {"api_aufruf"}
-    assert all(OP_TYPEN[art].rollen is None for art in andere)
+    assert all(OP_TYPEN[art].recht is None for art in andere)
 
 
 def test_beschreibungen_fuer_claude_enthalten_kein_markdown(kontext):

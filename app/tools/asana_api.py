@@ -1,5 +1,6 @@
 """Allgemeiner Asana-API-Aufruf: Auffangnetz für alles, wofür es keine eigene Funktion gibt."""
 
+from app.auth.rechte import ASANA_API_AUFRUF
 from app.tools.asana_client import AsanaClient
 from app.tools.asana_ops_api import (
     METHODEN,
@@ -9,6 +10,8 @@ from app.tools.asana_ops_api import (
 from app.tools.asana_schreiben import AsanaAenderungenAusfuehren
 from app.tools.base import BasisTool, ToolFehler, ToolKontext
 
+# Ein Recht, das niemand hat: So verschwindet das abgeschaltete Tool für alle.
+ABGESCHALTET = "abgeschaltet"
 STANDARD_LIMIT = 50
 MAX_LIMIT = 100
 
@@ -53,10 +56,11 @@ class AsanaApiAufruf(BasisTool):
 
     def __init__(self, kontext: ToolKontext) -> None:
         super().__init__(kontext)
-        settings = kontext.settings
-        # Abgeschaltet oder für andere Rollen taucht das Tool gar nicht in der Tool-Liste auf.
-        self.erlaubte_rollen = (
-            set(settings.asana_api_aufruf_roles) if settings.asana_api_aufruf_enabled else set()
+        # Abgeschaltet taucht das Tool für niemanden in der Tool-Liste auf.
+        self.erforderliche_rechte = (
+            frozenset({ASANA_API_AUFRUF})
+            if kontext.settings.asana_api_aufruf_enabled
+            else frozenset({ASANA_API_AUFRUF, ABGESCHALTET})
         )
         self.asana = AsanaClient(kontext)
         # Schreibende Aufrufe laufen als Änderungssatz mit einer Operation und nutzen damit

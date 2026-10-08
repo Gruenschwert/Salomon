@@ -62,7 +62,7 @@ def test_registry_findet_alle_lese_tools(kontext):
         tool = registry.hole(name)
         assert tool is not None, name
         assert not tool.schreibend
-        assert tool.erlaubte_rollen == {"admin", "user"}
+        assert tool.erforderliche_rechte == {"asana.lesen"}
 
 
 async def test_projekte_suchen_filtert_nach_namen(akontext, fake):

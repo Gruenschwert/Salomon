@@ -529,7 +529,6 @@ def test_leere_werte_in_der_env_bedeuten_standardwert(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.asana_max_ops_per_changeset == 100
     assert settings.asana_delete_enabled is True
-    assert settings.asana_delete_roles == {"admin"}
     assert settings.asana_attachment_view_max_mb == 5
     assert settings.photo_max_mb == 5
     assert settings.max_output_tokens == 8000

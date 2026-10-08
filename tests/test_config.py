@@ -61,7 +61,6 @@ def test_asana_standardwerte(monkeypatch):
     assert settings.asana_max_ops_per_changeset == 100
     assert settings.asana_max_deletes_per_changeset == 20
     assert settings.asana_delete_enabled is True
-    assert settings.asana_delete_roles == {"admin"}
     assert settings.photo_max_mb == 5
     assert settings.anthropic_workspace_id == ""
 
@@ -70,12 +69,13 @@ def test_asana_werte_aus_umgebung(monkeypatch):
     _setze(
         monkeypatch,
         ASANA_TOKEN="asana-geheim",
+        # Frühere Rollenlisten stören nicht mehr; Rechte kommen aus den Rollen der Person.
         ASANA_DELETE_ROLES="admin, user",
         ASANA_DELETE_ENABLED="false",
         ASANA_MAX_OPS_PER_CHANGESET="10",
     )
     settings = Settings(_env_file=None)
-    assert settings.asana_delete_roles == {"admin", "user"}
+    assert not hasattr(settings, "asana_delete_roles")
     assert settings.asana_delete_enabled is False
     assert settings.asana_max_ops_per_changeset == 10
     assert "asana-geheim" not in repr(settings)

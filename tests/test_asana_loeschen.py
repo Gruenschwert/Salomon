@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 
 import httpx
@@ -227,9 +228,8 @@ async def test_rolle_user_darf_nicht_loeschen(baue, user, admin, fake, session_f
         assert list(await session.scalars(select(Approval))) == []
     # Andere Änderungen bleiben für die Rolle möglich.
     await _anfrage(freigaben, tool, user, [{"operation": "aufgabe_erledigen", "gid": "8"}])
-    # Mit freigeschalteter Rolle geht auch das Löschen.
-    tool, freigaben = baue(asana_delete_roles=frozenset({"admin", "user"}))
-    await _anfrage(freigaben, tool, user)
+    # Mit dem Recht asana.loeschen geht auch das Löschen.
+    await _anfrage(freigaben, tool, replace(user, rechte=user.rechte | {"asana.loeschen"}))
     assert _geschrieben(fake) == []
 
 

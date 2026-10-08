@@ -117,8 +117,9 @@ async def test_tool_ausserhalb_der_rolle_wird_abgelehnt(settings, session_fabrik
     await agent.beantworte(nachricht("x"), user)
     (ergebnis,) = client.aufrufe[1]["messages"][-1]["content"]
     assert ergebnis["is_error"] is True
+    assert "fehlt dieser Person das Recht" in ergebnis["content"]
     (eintrag,) = await _audit(session_fabrik)
-    assert eintrag.fehler == "nicht verfügbar"
+    assert eintrag.fehler == "kein Recht"
 
 
 async def test_tool_fehler_fuehrt_nicht_zum_absturz(settings, session_fabrik, baue_agent, user):

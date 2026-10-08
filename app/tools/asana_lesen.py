@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from app.auth.rechte import ASANA_LESEN
 from app.tools.asana_client import (
     MAX_EINTRAEGE,
     AsanaClient,
@@ -71,6 +72,8 @@ GLEICHZEITIGE_ZAEHLUNGEN = 5
 
 class AsanaLeseTool(BasisTool):
     """Gemeinsame Basis; ohne `name` findet die Registry sie nicht als eigenes Tool."""
+
+    erforderliche_rechte = frozenset({ASANA_LESEN})
 
     def __init__(self, kontext: ToolKontext) -> None:
         super().__init__(kontext)

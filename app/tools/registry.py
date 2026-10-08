@@ -52,8 +52,9 @@ class Registry:
     def hole(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def api_definitionen(self, rolle: str) -> list[dict]:
-        """Tool-Liste für Claude; enthält nur, was die Rolle nutzen darf."""
+    def api_definitionen(self, nutzer: NutzerKontext) -> list[dict]:
+        """Tool-Liste für Claude: nur, wofür die Person alle Rechte hat. Was jemand nicht darf,
+        existiert für das Modell nicht. Die Reihenfolge ist stabil (nach Namen sortiert)."""
         return [
             {
                 "name": tool.name,
@@ -61,7 +62,7 @@ class Registry:
                 "input_schema": tool.parameter_schema,
             }
             for tool in self._tools.values()
-            if rolle in tool.erlaubte_rollen
+            if nutzer.darf(*tool.erforderliche_rechte)
         ]
 
 

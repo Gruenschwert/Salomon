@@ -40,6 +40,10 @@ TOOL_ZU_LANG_TEXT = (
     "abgeschnitten, auch im zweiten, kürzeren Versuch. Es wurde nichts vorbereitet und nichts "
     "geändert. Bitte grenze die Aufgabe ein oder lass MAX_OUTPUT_TOKENS erhöhen."
 )
+KEIN_RECHT_TEXT = (
+    "Für das Tool {tool} fehlt dieser Person das Recht. Es wurde nichts ausgeführt. Sag ihr "
+    "freundlich, dass ein Admin die passende Rolle vergeben kann."
+)
 NUR_FREIGABE_TEXT = "Ich habe den Änderungssatz vorbereitet. Die Vorschau mit den Buttons folgt."
 WARTET_AUF_FREIGABE_TEXT = (
     "Wartet auf Freigabe des Nutzers. Das Tool wurde NICHT ausgeführt. Der Nutzer sieht jetzt "
@@ -111,9 +115,11 @@ class Agent:
         anfrage = {
             "model": settings.model_default,
             "max_tokens": settings.max_output_tokens,
-            "system": baue_system_prompt(datetime.now(ZoneInfo(settings.tz)), freigaben_stand),
+            "system": baue_system_prompt(
+                datetime.now(ZoneInfo(settings.tz)), freigaben_stand, user
+            ),
         }
-        if tools := self._registry.api_definitionen(user.rolle):
+        if tools := self._registry.api_definitionen(user):
             anfrage["tools"] = tools
         tool_aufrufe = 0
         letztes_tool = ""
@@ -204,15 +210,19 @@ class Agent:
         self, name: str, params: dict, user: NutzerKontext, anfragen: list[FreigabeAnfrage]
     ) -> ToolErgebnis:
         tool = self._registry.hole(name)
-        if tool is None or user.rolle not in tool.erlaubte_rollen:
+        # Zweite Prüfung vor jeder Ausführung: schützt gegen erfundene Tool-Namen und gegen
+        # Tools, die das Modell gar nicht angeboten bekam.
+        if tool is None or not user.darf(*tool.erforderliche_rechte):
             await protokolliere(
                 self._session_fabrik,
                 user_id=user.id,
-                tool_name=name,
-                parameter=params,
-                fehler="nicht verfügbar",
+                tool_name=name[:100],
+                parameter=params if isinstance(params, dict) else {},
+                fehler="nicht verfügbar" if tool is None else "kein Recht",
             )
-            return ToolErgebnis(f"Das Tool {name} ist nicht verfügbar.", fehler=True)
+            if tool is None:
+                return ToolErgebnis(f"Das Tool {name} gibt es nicht.", fehler=True)
+            return ToolErgebnis(KEIN_RECHT_TEXT.format(tool=name), fehler=True)
         if not tool.ist_schreibend(params):
             return await fuehre_tool_aus(tool, params, user, self._kontext)
         # Schreibend: NICHT ausführen, sondern Freigabe anlegen.

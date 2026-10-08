@@ -247,7 +247,7 @@ class Freigaben:
         self, approval: Approval, user: NutzerKontext, zweifach: bool
     ) -> Entscheidung:
         tool = self._registry.hole(approval.tool_name)
-        if tool is None or user.rolle not in tool.erlaubte_rollen:
+        if tool is None or not user.darf(*tool.erforderliche_rechte):
             await protokolliere(
                 self._session_fabrik,
                 user_id=user.id,

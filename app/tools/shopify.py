@@ -4,6 +4,7 @@ import logging
 
 import httpx
 
+from app.auth.rechte import SHOPIFY_LESEN
 from app.tools.base import BasisTool, ToolFehler, ToolKontext
 
 log = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ async def shopify_abfrage(kontext: ToolKontext, shop: str, query: str, variablen
 
 
 class ShopifyLagerbestand(BasisTool):
+    erforderliche_rechte = frozenset({SHOPIFY_LESEN})
     name = "shopify_lagerbestand"
     beschreibung = (
         "Liefert den aktuellen Lagerbestand aus Shopify. Nutze es bei Fragen wie „Wie viele X "
@@ -148,6 +150,7 @@ class ShopifyLagerbestand(BasisTool):
 
 
 class ShopifyOffeneBestellungen(BasisTool):
+    erforderliche_rechte = frozenset({SHOPIFY_LESEN})
     name = "shopify_offene_bestellungen"
     beschreibung = (
         "Listet offene Bestellungen eines Shops aus Shopify, neueste zuerst. Mit "

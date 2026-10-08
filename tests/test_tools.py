@@ -26,12 +26,12 @@ def test_echte_registry_laedt_ohne_fehler(kontext):
     assert "BasisTool" not in namen
 
 
-def test_api_definitionen_beachten_rolle(registry):
-    fuer_user = {d["name"] for d in registry.api_definitionen("user")}
-    fuer_admin = {d["name"] for d in registry.api_definitionen("admin")}
+def test_api_definitionen_beachten_rechte(registry, user, admin):
+    fuer_user = {d["name"] for d in registry.api_definitionen(user)}
+    fuer_admin = {d["name"] for d in registry.api_definitionen(admin)}
     assert "beispiel_admin" not in fuer_user
     assert "beispiel_admin" in fuer_admin
-    definition = registry.api_definitionen("user")[0]
+    definition = registry.api_definitionen(user)[0]
     assert set(definition) == {"name", "description", "input_schema"}
 
 

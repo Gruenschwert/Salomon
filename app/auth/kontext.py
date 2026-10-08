@@ -39,10 +39,5 @@ class NutzerKontext:
     def ist_admin(self) -> bool:
         return ROLLE_ADMIN in self.rollen
 
-    @property
-    def rolle(self) -> str:
-        """Frühere Einteilung in admin/user; wird mit den Rechten abgelöst."""
-        return "admin" if self.ist_admin else "user"
-
     def darf(self, *rechte: str) -> bool:
         return all(recht in self.rechte for recht in rechte)

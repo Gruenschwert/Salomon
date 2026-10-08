@@ -1,5 +1,6 @@
 """Operationen für Mitglieder und Follower von Projekten, Follower von Aufgaben und Teams."""
 
+from app.auth.rechte import ASANA_TEAMS
 from app.tools.asana_operationen import (
     KATEGORIE_AENDERN,
     KATEGORIE_ANLEGEN,
@@ -18,7 +19,6 @@ from app.tools.asana_operationen import (
 )
 from app.tools.base import ToolFehler
 
-TEAM_ROLLEN = "asana_team_verwaltung_roles"
 # Sichtbarkeit eines Teams laut Asana-Doku (Feld visibility)
 TEAM_SICHTBARKEIT = {"geheim": "secret", "auf_anfrage": "request_to_join", "oeffentlich": "public"}
 
@@ -153,7 +153,7 @@ _aufgaben_follower("follower_entfernen", "removeFollowers", "entfernen", "entfer
 
 
 # --------------------------------------------------------------------------------------
-# Teams (nur für die Rollen aus ASANA_TEAM_VERWALTUNG_ROLES)
+# Teams (nur mit dem Recht asana.teams)
 # --------------------------------------------------------------------------------------
 
 
@@ -174,7 +174,7 @@ def _team_daten(op: dict) -> dict:
     pflicht={"name"},
     optional={"beschreibung", "team_sichtbarkeit"},
     erzeugt="team",
-    rollen=TEAM_ROLLEN,
+    recht=ASANA_TEAMS,
 )
 class TeamAnlegen:
     @staticmethod
@@ -199,7 +199,7 @@ class TeamAnlegen:
     KATEGORIE_AENDERN,
     pflicht={"team_gid"},
     optional={"name", "beschreibung", "team_sichtbarkeit"},
-    rollen=TEAM_ROLLEN,
+    recht=ASANA_TEAMS,
 )
 class TeamAendern:
     @staticmethod
@@ -246,7 +246,7 @@ class TeamAendern:
     "team_mitglied_hinzufuegen",
     KATEGORIE_AENDERN,
     pflicht={"team_gid", "nutzer"},
-    rollen=TEAM_ROLLEN,
+    recht=ASANA_TEAMS,
 )
 class TeamMitgliedHinzufuegen:
     @staticmethod
@@ -272,7 +272,7 @@ class TeamMitgliedHinzufuegen:
     "team_mitglied_entfernen",
     KATEGORIE_LOESCHEN,
     pflicht={"team_gid", "nutzer"},
-    rollen=TEAM_ROLLEN,
+    recht=ASANA_TEAMS,
 )
 class TeamMitgliedEntfernen:
     @staticmethod

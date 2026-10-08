@@ -38,7 +38,7 @@ class BeispielNurAdmin(BasisTool):
     name = "beispiel_admin"
     beschreibung = "Nur für Admins."
     parameter_schema = {"type": "object", "properties": {}}
-    erlaubte_rollen = {"admin"}
+    erforderliche_rechte = frozenset({"admin.nutzer"})
 
     async def ausfuehren(self) -> dict:
         return {"ok": True}

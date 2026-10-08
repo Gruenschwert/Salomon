@@ -246,8 +246,8 @@ class OpTyp:
     gid_typ: str | None = None
     # Felder, bei denen ein leerer Wert „löschen“ bedeutet
     leerbar: frozenset[str] = frozenset()
-    # Name der Einstellung mit den Rollen, die diese Operation vorschlagen dürfen
-    rollen: str | None = None
+    # Zusätzliches Recht, das diese Operation braucht (z. B. Team-Verwaltung)
+    recht: str | None = None
 
 
 OP_TYPEN: dict[str, OpTyp] = {}
@@ -261,7 +261,7 @@ def registriere(
     erzeugt: str | None = None,
     gid_typ: str | None = None,
     leerbar: set[str] = frozenset(),
-    rollen: str | None = None,
+    recht: str | None = None,
 ) -> Callable[[type], type]:
     def dekorator(klasse: type) -> type:
         OP_TYPEN[art] = OpTyp(
@@ -274,7 +274,7 @@ def registriere(
             erzeugt=erzeugt,
             gid_typ=gid_typ,
             leerbar=frozenset(leerbar),
-            rollen=rollen,
+            recht=recht,
         )
         return klasse
 

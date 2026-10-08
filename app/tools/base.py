@@ -17,7 +17,7 @@ class Tool(Protocol):
     beschreibung: str  # Klartext für Claude: wann nutzen, was kommt zurück
     parameter_schema: dict  # JSON-Schema der Eingaben
     schreibend: bool  # True = braucht Freigabe
-    erlaubte_rollen: set[str]  # {"admin","user"}
+    erforderliche_rechte: frozenset[str]  # z. B. {"asana.lesen"}; leer = für alle
     ergebnis_im_verlauf: bool  # True = Ergebnis der Freigabe kommt in den Gesprächsverlauf
 
     async def ausfuehren(self, **params) -> dict: ...
@@ -104,7 +104,9 @@ class BasisTool:
     max_ergebnis_zeichen: ClassVar[int | None] = None
     # True: Das Ergebnis der Freigabe wird in den Gesprächsverlauf geschrieben.
     ergebnis_im_verlauf: ClassVar[bool] = False
-    erlaubte_rollen: ClassVar[set[str]] = {"admin", "user"}
+    # Rechte, die eine Person für dieses Tool braucht. Ohne sie existiert das Tool für das
+    # Modell nicht, und der Ausführer lehnt es ab.
+    erforderliche_rechte: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, kontext: ToolKontext) -> None:
         self.kontext = kontext

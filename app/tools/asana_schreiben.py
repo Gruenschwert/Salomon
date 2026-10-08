@@ -6,6 +6,7 @@ from collections import Counter
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.auth.rechte import ASANA_LOESCHEN, ASANA_SCHREIBEN
 from app.db.models import (
     OP_ERLEDIGT,
     OP_FEHLGESCHLAGEN,
@@ -213,6 +214,7 @@ class AsanaAenderungenAusfuehren(BasisTool):
     }
     schreibend = True
     ergebnis_im_verlauf = True
+    erforderliche_rechte = frozenset({ASANA_SCHREIBEN})
 
     def __init__(self, kontext: ToolKontext) -> None:
         super().__init__(kontext)
@@ -237,15 +239,13 @@ class AsanaAenderungenAusfuehren(BasisTool):
         return ops
 
     def _pruefe_rollen(self, ops: list[dict]) -> None:
-        """Manche Operationen sind bestimmten Rollen vorbehalten (z. B. Team-Verwaltung)."""
+        """Manche Operationen brauchen ein eigenes Recht (z. B. Team-Verwaltung)."""
         for op in ops:
-            einstellung = OP_TYPEN[op["operation"]].rollen
-            if einstellung is None:
-                continue
-            if aktueller_nutzer.get().rolle not in getattr(self.kontext.settings, einstellung):
+            recht = OP_TYPEN[op["operation"]].recht
+            if recht is not None and not aktueller_nutzer.get().darf(recht):
                 raise ToolFehler(
-                    f"Die Operation {op['operation']} ist dieser Rolle nicht erlaubt "
-                    f"({einstellung.upper()})."
+                    f"Für die Operation {op['operation']} fehlt dir das Recht {recht}. Die "
+                    "Rolle dafür kann ein Admin vergeben."
                 )
 
     def _pruefe_loeschungen(self, ops: list[dict]) -> None:
@@ -258,8 +258,11 @@ class AsanaAenderungenAusfuehren(BasisTool):
                 "Löschen in Asana ist abgeschaltet (ASANA_DELETE_ENABLED=false). Es wurde "
                 "nichts vorgeschlagen."
             )
-        if aktueller_nutzer.get().rolle not in settings.asana_delete_roles:
-            raise ToolFehler("Dieser Nutzer darf in Asana nichts löschen.")
+        if not aktueller_nutzer.get().darf(ASANA_LOESCHEN):
+            raise ToolFehler(
+                "Dieser Nutzer darf in Asana nichts löschen. Das Recht dafür kann ein Admin "
+                "über eine Rolle vergeben."
+            )
         if anzahl > settings.asana_max_deletes_per_changeset:
             raise ToolFehler(
                 f"Der Änderungssatz enthält {anzahl} Löschoperationen, erlaubt sind höchstens "
