@@ -24,6 +24,7 @@ from app.tools import (  # noqa: F401
     asana_ops_mitglieder,
     asana_ops_verwaltung,
     asana_ops_vorlagen,
+    asana_ops_wiederholung,
 )
 from app.tools.asana_client import AsanaClient
 from app.tools.asana_operationen import (
