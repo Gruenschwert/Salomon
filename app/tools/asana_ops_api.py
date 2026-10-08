@@ -44,6 +44,9 @@ SPERRLISTE: tuple[tuple[frozenset[str], str, str], ...] = (
     (ALLE, "webhooks", "Webhooks"),
     (ALLE, "organization_exports", "Export der ganzen Organisation"),
     (ALLE, "audit_log_events", "Audit-Log der Organisation"),
+    (ALLE, "exports", "Massenexport von Daten"),
+    # Über /batch ließen sich beliebige andere Aufrufe verpacken, auch gesperrte.
+    (ALLE, "batch", "Sammelaufrufe"),
     (frozenset({"POST"}), "attachments", "Datei-Upload (dafür gibt es anhang_hinzufuegen)"),
 )
 # Token- und Anmelde-Endpunkte sind in jedem Segment und mit jeder Methode gesperrt.

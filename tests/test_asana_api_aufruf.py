@@ -133,6 +133,9 @@ def test_normale_pfade_sind_erlaubt(pfad):
         ("DELETE", "/webhooks/5"),
         ("GET", "/organization_exports/5"),
         ("GET", "/audit_log_events"),
+        ("POST", "/exports"),
+        ("POST", "/batch"),
+        ("POST", "/Batch"),
         ("POST", "/attachments"),
         ("POST", "/oauth_token"),
         ("GET", "/OAuth/authorize"),
@@ -180,6 +183,8 @@ def test_sperrliste_ist_als_konstante_festgeschrieben():
         (("DELETE", "GET", "POST", "PUT"), "webhooks"),
         (("DELETE", "GET", "POST", "PUT"), "organization_exports"),
         (("DELETE", "GET", "POST", "PUT"), "audit_log_events"),
+        (("DELETE", "GET", "POST", "PUT"), "exports"),
+        (("DELETE", "GET", "POST", "PUT"), "batch"),
         (("POST",), "attachments"),
     }
     assert isinstance(SPERRLISTE, tuple) and isinstance(GESPERRTE_WORTTEILE, tuple)

@@ -2,7 +2,7 @@
 
 Interner KI-Assistent der Grünschwert GmbH (Canasups, Kiffkraut). Bedienung per Telegram, Claude als Gehirn, Tools für Shopify und Asana.
 
-Die verbindlichen Vorgaben stehen in [BAUPLAN.md](BAUPLAN.md) (Phase 0 und 1) und [ASANA_TOOL.md](ASANA_TOOL.md) (Asana-Assistent und Foto-Eingang). Beide sind umgesetzt.
+Die verbindlichen Vorgaben stehen in [BAUPLAN.md](BAUPLAN.md) (Phase 0 und 1), [ASANA_TOOL.md](ASANA_TOOL.md) (Asana-Assistent und Foto-Eingang) und [ASANA_TOOL_ERWEITERUNG.md](ASANA_TOOL_ERWEITERUNG.md) (Asana-Erweiterung). Alle drei sind umgesetzt.
 
 ## Was der Bot kann
 
@@ -13,6 +13,8 @@ Die verbindlichen Vorgaben stehen in [BAUPLAN.md](BAUPLAN.md) (Phase 0 und 1) un
 - Asana lesen: Projekte, Aufgaben, Aufgabendetails, Abschnitte, Nutzer und Tags suchen.
 - Asana ändern: anlegen, bearbeiten, verschieben, erledigen, kommentieren und löschen, immer als Änderungssatz mit einer Freigabe. Details unter [Asana](#asana).
 - Fotos von Papierplänen lesen und daraus einen Änderungssatz vorschlagen.
+- Fotos und Dateien aus dem Chat an Aufgaben oder Projekte anhängen, Anhänge (Bilder, PDFs) aus Asana lesen.
+- Benutzerdefinierte Felder, Vorlagen, Kopien, Mitglieder, Teams, Zeiterfassung, Statusmeldungen, Projekt-Briefing, Portfolios und Ziele. Übersicht unter [Was der Bot in Asana kann](#was-der-bot-in-asana-kann).
 - `/status` (nur Admins): Version, Uptime, Kosten heute, offene Freigaben.
 - Jeder Tool-Aufruf steht im `audit_log`, der Verbrauch je Tag und Nutzer in `usage`.
 
@@ -104,6 +106,10 @@ Ist das Tageslimit (`DAILY_COST_LIMIT_EUR`, gilt für alle Nutzer zusammen) erre
 | `ASANA_DELETE_ENABLED` | true | `false` schaltet Löschen ganz ab, auch für Admins |
 | `ASANA_DELETE_ROLES` | admin | Rollen, die Löschungen vorschlagen dürfen (`admin`, `user`, Komma-getrennt) |
 | `PHOTO_MAX_MB` | 5 | Größere Fotos lehnt der Bot ab |
+| `ASANA_ATTACHMENT_VIEW_MAX_MB` | 5 | Größere Anhänge lädt der Bot nicht zum Lesen herunter |
+| `ASANA_API_AUFRUF_ENABLED` | true | `false` schaltet den allgemeinen API-Aufruf ganz ab |
+| `ASANA_API_AUFRUF_ROLES` | admin | Rollen, die den allgemeinen API-Aufruf nutzen dürfen |
+| `ASANA_TEAM_VERWALTUNG_ROLES` | admin | Rollen, die Teams anlegen, ändern und Mitglieder verwalten dürfen |
 | `MAX_OUTPUT_TOKENS` | 8000 | Ein Änderungssatz ist Claudes Ausgabe. Bei kleineren Werten passen große Pläne nicht in einen Satz |
 
 ### So läuft eine Änderung ab
@@ -118,7 +124,52 @@ Termine gibt es in drei Formen: nur Fälligkeit (mit oder ohne Uhrzeit), ganze T
 
 Fotos: ein Foto (oder ein Album mit bis zu 5 Fotos) mit oder ohne Bildunterschrift schicken. Claude gibt erst wieder, was es erkannt hat, fragt Fehlendes gebündelt nach und schlägt dann den Änderungssatz vor. Die Bilder werden nicht gespeichert; im Verlauf steht nur „[Foto]“ plus Bildunterschrift.
 
-Was nicht geht, weil die Asana-API es nicht anbietet: wiederkehrende Aufgaben einrichten, Regeln/Automatisierungen, Formulare.
+Eine leere Zeile wie `ASANA_API_AUFRUF_ROLES=` in `.env` bedeutet den Standardwert.
+
+### Was der Bot in Asana kann
+
+Lesen (ohne Freigabe): Projekte, Aufgaben samt Details, Abschnitte, Nutzer, Tags, benutzerdefinierte Felder, Projekt- und Aufgabenvorlagen, Teams und ihre Mitglieder, Portfolios, Ziele und Teilziele, Anhänge, Zeiteinträge, Statusmeldungen. Bilder und PDFs unter den Anhängen kann Claude ansehen. Aufgaben zeigen zusätzlich die Werte benutzerdefinierter Felder, die Anzahl der Anhänge und eine Wiederholungsregel.
+
+Ändern (immer als Änderungssatz mit Freigabe):
+
+| Bereich | Operationen |
+|---|---|
+| Projekte | anlegen, ändern (auch Sichtbarkeit, Standardansicht, Notizen, Farbe), archivieren, löschen, aus Vorlage, duplizieren, Mitglieder und Follower, Briefing |
+| Abschnitte | anlegen, umbenennen, löschen, umsortieren |
+| Aufgaben | anlegen, ändern, erledigen, verschieben, löschen, aus Vorlage, duplizieren, mehreren Projekten zuordnen, Unteraufgaben umhängen oder herauslösen, umsortieren, Genehmigungen, Follower, „Gefällt mir“ |
+| Kommentare | hinzufügen, eigene bearbeiten und löschen |
+| Anhänge | Datei oder Foto aus dem Chat, externer Link, löschen |
+| Benutzerdefinierte Felder | anlegen, ändern, löschen, Option hinzufügen, im Projekt einrichten oder entfernen, Werte an Aufgaben setzen |
+| Tags, Abhängigkeiten | anlegen, zuweisen, entfernen |
+| Teams (nur `ASANA_TEAM_VERWALTUNG_ROLES`) | anlegen, ändern, Mitglieder hinzufügen und entfernen |
+| Zeiterfassung | erfassen, ändern, löschen |
+| Statusmeldungen | erstellen (Projekt, Portfolio, Ziel), löschen |
+| Portfolios | anlegen, ändern, löschen, Projekte aufnehmen und herausnehmen |
+| Ziele | anlegen, ändern, löschen, mit Projekt, Aufgabe, Portfolio oder Teilziel verknüpfen |
+| Wiederholungen (experimentell) | von einer Aufgabe übernehmen, entfernen |
+
+Dateien anhängen: Schick ein Foto oder Dokument und schreib dazu, wohin es soll („häng das an die Aufgabe X“). Der Bot merkt sich nur, wo die Datei bei Telegram liegt (Tabelle `telegram_dateien`), und lädt sie erst nach deiner Freigabe, um sie an Asana zu übergeben. Telegram gibt Bots nur Dateien bis 20 MB heraus; größere musst du direkt in Asana hochladen. Ein Foto ohne solchen Wunsch behandelt der Bot wie bisher als Plan. Ist unklar, was gemeint ist, fragt er einmal nach.
+
+Benutzerdefinierte Felder an Aufgaben setzt du mit Namen: Der Bot findet Feld und Option selbst. Gibt es den Namen mehrfach, fragt er nach. Ist ein Feld im Projekt der Aufgabe nicht eingerichtet, sagt er das und bietet an, es dort einzurichten.
+
+Projekte aus Vorlagen und Kopien erledigt Asana im Hintergrund. Der Bot wartet bis zu 60 Sekunden darauf. Dauert es länger, bricht der Satz ab und meldet das; das Projekt entsteht in Asana meist trotzdem, also dort nachsehen, bevor du es noch einmal anstößt.
+
+Wiederholungen: Die Asana-Schnittstelle beschreibt das Feld dafür nicht. Der Bot baut deshalb keine Wiederholung selbst, sondern überträgt sie von einer Aufgabe, an der du sie in Asana von Hand eingerichtet hast („gib Aufgabe A dieselbe Wiederholung wie Aufgabe B“). Lege dir dafür je Muster (täglich, wöchentlich, monatlich, jährlich) eine Beispielaufgabe an. Lehnt Asana den Aufruf ab, sagt der Bot das und nennt den Weg in Asana: Aufgabe öffnen, auf das Datum klicken, „Wiederholen“.
+
+Je nach Asana-Tarif fehlen benutzerdefinierte Felder, Zeiterfassung, Portfolios, Ziele oder Startzeiten. Der Bot meldet dann „Das ist in eurem Asana-Tarif nicht verfügbar oder dein Token darf das nicht“ und bricht den Satz an dieser Stelle ab.
+
+Was nicht geht, weil die Asana-Schnittstelle es nicht anbietet (Stand Oktober 2026, gegen die API-Referenz geprüft): Regeln und Automatisierungen anlegen oder ändern (nur das Auslösen von Regeln mit Web-Request-Auslöser), Formulare, Dashboards und Berichtsdiagramme, gespeicherte Ansichten und Filter, Benachrichtigungseinstellungen und die Inbox. Der Bot beschreibt dann den Weg in Asana.
+
+### Allgemeiner API-Aufruf
+
+Für alles, wofür es keine eigene Funktion gibt, kann Claude mit `asana_api_aufruf` einen beliebigen Endpunkt unter `https://app.asana.com/api/1.0` ansprechen. Standardmäßig dürfen das nur Admins.
+
+- GET läuft sofort, liefert höchstens eine Seite und wird gekürzt.
+- POST und PUT zeigen Methode, Pfad, Begründung und Body als Vorschau und laufen erst nach ✅.
+- DELETE braucht zusätzlich die zweite Bestätigung und die Lösch-Rolle.
+- Der Pfad darf nur aus einfachen Segmenten bestehen (`/tasks/123/stories`). Host, `..`, Fragezeichen und Sonderzeichen werden abgelehnt, bevor etwas gesendet wird. Den Token setzt nur der Client.
+- Immer gesperrt: Änderungen an Nutzern, Workspaces und Workspace-Mitgliedschaften, Rollen, Budgets, Zugriffsanfragen, Webhooks, Organisations- und Massenexporte, das Audit-Log der Organisation, Sammelaufrufe (`/batch`), Token- und Anmelde-Endpunkte sowie Datei-Uploads. Die Liste steht als Konstante in `app/tools/asana_ops_api.py` und ist per Test abgesichert.
+- Jeder Aufruf steht mit Pfad und Body im `audit_log`.
 
 ### Abnahme
 
@@ -126,7 +177,11 @@ Was nicht geht, weil die Asana-API es nicht anbietet: wiederkehrende Aufgaben ei
 2. „Verschiebe alle offenen Aufgaben von Max auf nächsten Montag“ → Vorschau mit Vorher/Nachher, nach ✅ in Asana prüfen.
 3. „Lösche die Aufgabe Y“ → 🗑-Vorschau, zweite Rückfrage, erst danach gelöscht.
 4. Foto eines handschriftlichen Plans → Erkennung zur Kontrolle, dann Vorschau. ✅ legt Projekt, Abschnitte und Aufgaben an, ❌ nichts.
-5. `/status` zählt wartende Freigaben mit. Der Token darf in `docker compose logs app` nirgends stehen.
+5. Eine PDF-Datei schicken mit „häng das an die Aufgabe Y“ → Vorschau, nach ✅ hängt die Datei in Asana an der Aufgabe.
+6. „Setz bei Aufgabe Y das Feld Priorität auf Hoch“ → Vorschau mit altem und neuem Wert.
+7. „Leg aus der Vorlage Z ein Projekt an“ → der Bot fragt nach den Terminen der Vorlage, nach ✅ existiert das Projekt.
+8. Wiederholung: in Asana an einer Testaufgabe von Hand einrichten, dann „gib Aufgabe A dieselbe Wiederholung“. Das ist der Live-Test für die experimentelle Funktion.
+9. `/status` zählt wartende Freigaben mit. Der Token darf in `docker compose logs app` nirgends stehen.
 
 ### Nachvollziehen
 
@@ -139,7 +194,9 @@ docker compose exec db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "select
 
 ### Sicherheit
 
-- Geändert wird ausschließlich über `asana_aenderungen_ausfuehren`, und das läuft nur aus einer erteilten Freigabe heraus.
+- Geändert wird ausschließlich über `asana_aenderungen_ausfuehren` und die schreibenden Aufrufe von `asana_api_aufruf`; beides läuft nur aus einer erteilten Freigabe heraus und über denselben Code.
+- Als Löschung zählen auch Anhänge, Felder, Portfolios, Ziele, Statusmeldungen, Kommentare, Briefings, Zeiteinträge, das Entfernen von Team-Mitgliedern und jeder DELETE über den allgemeinen API-Aufruf.
+- Anhänge lädt der Bot von der Adresse, die Asana nennt, ohne den Asana-Token mitzuschicken.
 - Gelöscht wird nur mit einer GID aus einem Lese-Tool, nie nach Name und nie über einen Platzhalter. Die Löschregeln werden beim Vorschlagen und noch einmal beim Ausführen geprüft.
 - Alle Secrets (Telegram, Anthropic, Asana, Shopify, Datenbank-Passwort) werden in jeder Log-Zeile durch `***` ersetzt, auch in Fehlerausgaben. `httpx` und `telegram` loggen erst ab WARNING.
 - Texte aus Asana und aus Fotos gelten für Claude als Daten, nicht als Anweisungen.
@@ -156,7 +213,7 @@ Die Tests brauchen weder Docker noch Zugangsdaten: Sie laufen gegen SQLite im Sp
 
 Neues Tool: eine Datei in `app/tools/` mit einer Unterklasse von `BasisTool` anlegen. Die Registry findet sie automatisch. Mit `schreibend = True` läuft das Tool nur nach Freigabe und braucht eine `vorschau()`. Muss die Vorschau erst etwas nachlesen, überschreibt das Tool stattdessen das asynchrone `bereite_vor()`. Optional sind `ergebnis_text()` für eine eigene Ergebnis-Meldung und `zweite_bestaetigung()` für eine zweite Rückfrage.
 
-Neue Asana-Operation: eine Klasse mit `vorschau` und `ausfuehren` in `app/tools/asana_operationen.py`, registriert über `@_registriere`.
+Neue Asana-Operation: eine Klasse mit `vorschau` und `ausfuehren` in einem der Module `app/tools/asana_ops_*.py`, registriert über `@registriere`. Das Modul trägt seine Felder in `ZUSATZ_SCHEMA` und `ZUSATZ_BESCHREIBUNG` ein und wird in `asana_schreiben.py` importiert. Feldnamen und Bodys stammen aus der API-Referenz von Asana, nicht aus dem Gedächtnis.
 
 ## Abweichungen vom Bauplan
 
@@ -174,6 +231,13 @@ Festlegungen zu ASANA_TOOL.md, wo das Dokument offen war (ebenfalls abgestimmt):
 - Das Ergebnis einer Asana-Freigabe (ausgeführt, verworfen, abgelaufen) wird als „[Ergebnis der Freigabe]“ in den Gesprächsverlauf geschrieben, damit Claude es bei der nächsten Nachricht kennt.
 - Zusätzliche Tabelle `asana_operationen` und zusätzlicher Freigabe-Status `bestätigung` (erstes ✅ ist da, die Lösch-Rückfrage steht aus).
 
+Festlegungen zu ASANA_TOOL_ERWEITERUNG.md:
+
+- Zusätzliche Tabelle `telegram_dateien` (Migration 0003) mit Verweisen auf Dateien aus dem Chat, ohne deren Inhalt.
+- Sperrliste des allgemeinen API-Aufrufs über die Vorgabe hinaus erweitert: `/batch`, `/exports`, `/organization_exports`, `/audit_log_events`, `/workspace_memberships` und alle schreibenden Aufrufe unter `/users` und `/workspaces`, nicht nur PUT.
+- `wiederholung_setzen` nimmt keine frei beschriebene Wiederholung an, nur die einer Vorlage-Aufgabe.
+- Eine neue Genehmigung legt `aufgabe_anlegen` mit `genehmigung=true` an; `aufgabe_genehmigung` setzt den Stand.
+
 ## Bekannte Grenzen
 
 - Im Gesprächsverlauf wird je Runde nur der Text gespeichert, keine Tool-Ergebnisse. Claude kennt in der nächsten Nachricht also seine eigene Antwort, nicht die Rohdaten dahinter. Ob eine Freigabe erteilt wurde, erfährt Claude nur bei Asana-Änderungssätzen, nicht bei `demo_notiz`.
@@ -181,7 +245,11 @@ Festlegungen zu ASANA_TOOL.md, wo das Dokument offen war (ebenfalls abgestimmt):
 - Antwortet Asana auf einen schreibenden Aufruf nicht (Timeout nach 10 s), bricht der Satz ab und meldet, dass unklar ist, ob diese eine Änderung angekommen ist. Sie wird bewusst nicht wiederholt; bitte in Asana nachsehen.
 - Die Vorschau zeigt den Stand zum Zeitpunkt des Vorschlags. Ändert jemand in den bis zu 15 Minuten bis zum Klick etwas in Asana, gilt beim Ausführen der dann aktuelle Stand; die Vorher-Werte im Audit-Log stammen vom Zeitpunkt der Ausführung.
 - Die Aufgabensuche über den ganzen Workspace gibt es bei Asana nur in bezahlten Tarifen. Ohne sie sucht der Bot je Projekt oder je Zuständigem und sagt das, wenn eine Angabe fehlt.
-- Follower lassen sich hinzufügen, aber nicht entfernen. Fotos werden nur als Telegram-Foto gelesen, nicht als angehängte Datei.
+- Dokumente aus dem Chat kann der Bot anhängen, aber nicht lesen; lesen kann er Fotos im Chat sowie Bilder und PDFs, die schon in Asana hängen.
+- Die Aufgabensuche fragt je Treffer die Zahl der Anhänge ab. Das sind bis zu 30 zusätzliche Aufrufe je Suche und zählt gegen das Abfragelimit von Asana.
+- Beim Duplizieren eines Projekts lässt sich kein Team angeben: Die API-Referenz kennt dafür kein Feld, die Kopie landet im Team des Originals.
+- Die Wiederholungsregel ist in der Asana-Doku nicht beschrieben. Lesen und Übertragen sind deshalb ungeprüft, bis du sie einmal live ausprobiert hast.
+- Portfolios zeigt Asana über einen persönlichen Token nur an, wenn sie dem Token-Inhaber gehören.
 - `MODEL_CHEAP` ist konfiguriert, wird in Phase 0/1 aber noch nirgends verwendet.
 - Der Filter „ohne Tracking“ prüft die 50 neuesten offenen Bestellungen; gibt es mehr, weist das Ergebnis darauf hin. Shopify liefert mit `read_orders` standardmäßig nur Bestellungen der letzten 60 Tage.
 - Abgelaufene Freigaben werden erst beim Klick als `abgelaufen` markiert; `/status` zählt sie trotzdem nicht mehr mit.
