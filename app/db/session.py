@@ -23,6 +23,9 @@ def erstelle_engine(database_url: str, laufzeitrolle: bool = True, **optionen) -
     if laufzeitrolle:
         optionen["connect_args"] = {"server_settings": {"role": LAUFZEITROLLE}}
     optionen.setdefault("pool_pre_ping", True)
+    # Fehlermeldungen der Datenbank nennen sonst die Werte der Abfrage, also auch
+    # Nachrichtentexte. Die gehören nicht ins Log.
+    optionen.setdefault("hide_parameters", True)
     return create_async_engine(database_url, **optionen)
 
 

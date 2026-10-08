@@ -1,7 +1,12 @@
 import logging
 
+import pytest
 from pydantic import SecretStr
+from sqlalchemy.exc import DBAPIError
 
+from app.channels.base import EingehendeNachricht
+from app.db.models import Message
+from app.db.session import db_sitzung
 from app.main import erstelle_anthropic_client
 from app.observability.geheimnisse import (
     LEISE_LOGGER,
@@ -10,6 +15,8 @@ from app.observability.geheimnisse import (
     richte_logging_ein,
     sammle_geheimnisse,
 )
+from tests.conftest import ERLAUBT_ID
+from tests.fakes import FakeAnthropic, claude_antwort, text_block, tool_use_block
 
 
 def _settings(settings):
@@ -78,3 +85,58 @@ def test_anthropic_client_mit_workspace_id(settings):
         settings.model_copy(update={"anthropic_workspace_id": " wrkspc_01 "})
     )
     assert client.default_headers["anthropic-workspace-id"] == "wrkspc_01"
+
+
+# ---------------------------------------------------------------- Inhalte bleiben aus den Logs
+
+
+def test_adresse_der_telegram_api_wird_maskiert(settings):
+    """Die Adresse jeder Telegram-Anfrage enthält den Bot-Token."""
+    formatter = MaskierenderFormatter(sammle_geheimnisse(_settings(settings)))
+    record = logging.LogRecord(
+        "httpx",
+        logging.WARNING,
+        __file__,
+        1,
+        "HTTP Request: POST %s",
+        ("https://api.telegram.org/bot123456:telegram-geheim/sendMessage",),
+        None,
+    )
+    zeile = formatter.format(record)
+    assert "https://api.telegram.org/bot***/sendMessage" in zeile
+    assert "telegram-geheim" not in zeile
+
+
+def test_hauptschluessel_gehoert_zu_den_maskierten_werten(settings):
+    geheimnisse = sammle_geheimnisse(settings)
+    assert settings.secrets_master_key.get_secret_value() in geheimnisse
+
+
+async def test_gespraech_und_tool_daten_stehen_nicht_im_log(baue_agent, user, caplog):
+    """Ein ganzer Durchlauf mit Tool-Aufruf auf DEBUG: weder Frage noch Tool-Eingabe noch
+    Antwort landen im Log."""
+    client = FakeAnthropic(
+        claude_antwort(tool_use_block("beispiel_lesen", {"text": "TOOL-EINGABE-4711"})),
+        claude_antwort(tool_use_block("beispiel_kaputt", {})),
+        claude_antwort(text_block("ANTWORT-4711")),
+    )
+    nachricht = EingehendeNachricht(
+        chat_id=1, absender_id=ERLAUBT_ID, absender_name="X", text="Gehalt FRAGE-4711"
+    )
+    with caplog.at_level(logging.DEBUG):
+        antwort = await baue_agent(client).beantworte(nachricht, user)
+    assert antwort.text == "ANTWORT-4711"
+    # Der Fehler im Tool wird protokolliert, die Inhalte nicht.
+    assert "Unerwarteter Fehler im Tool beispiel_kaputt" in caplog.text
+    assert "4711" not in caplog.text
+
+
+async def test_datenbankfehler_nennen_keine_inhalte(laufzeit_fabrik, user):
+    """Scheitert das Speichern einer Nachricht, steht ihr Text nicht in der Fehlermeldung."""
+    with pytest.raises(DBAPIError) as fehler:
+        async with db_sitzung(laufzeit_fabrik, user) as session:
+            # chat_id fehlt: die Datenbank lehnt die Zeile ab
+            session.add(Message(user_id=user.id, rolle="user", inhalt="GEHEIMER-TEXT-4711"))
+            await session.commit()
+    assert "4711" not in str(fehler.value)
+    assert "hidden" in str(fehler.value)

@@ -394,3 +394,35 @@ def test_kein_tool_schema_laesst_das_modell_eine_person_waehlen(kontext):
     for tool in tools:
         gefunden = schluessel(tool.parameter_schema) & verboten
         assert not gefunden, f"{tool.name}: {gefunden}"
+
+
+async def test_eigener_datenbank_login_ueber_app_database_url(pg_url, engine, user, admin):
+    """Die strengere Variante aus der README: ein eigener Login, der nur Mitglied der
+    Laufzeitrolle ist. Auch er sieht nur die Zeilen der jeweiligen Person."""
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.pool import NullPool
+
+    from app.db.session import erstelle_engine, erstelle_session_fabrik
+
+    async with engine.begin() as verbindung:
+        await verbindung.execute(text("DROP ROLE IF EXISTS gs_bot_test"))
+        await verbindung.execute(
+            text(f"CREATE ROLE gs_bot_test LOGIN PASSWORD 'geheim' IN ROLE {LAUFZEITROLLE}")
+        )
+    url = make_url(pg_url).set(username="gs_bot_test", password="geheim")
+    eigene = erstelle_engine(url.render_as_string(hide_password=False), poolclass=NullPool)
+    fabrik = erstelle_session_fabrik(eigene)
+    try:
+        await speichere_austausch(fabrik, 1, user.id, "Frage von A", "Antwort an A")
+        async with db_sitzung(fabrik, user) as session:
+            wer = (await session.execute(text("SELECT session_user, current_user"))).one()
+            assert tuple(wer) == ("gs_bot_test", LAUFZEITROLLE)
+            assert len(list(await session.scalars(select(Message)))) == 2
+        async with db_sitzung(fabrik, admin) as session:
+            assert list(await session.scalars(select(Message))) == []
+        async with fabrik() as session:
+            assert list(await session.scalars(select(Message))) == []
+    finally:
+        await eigene.dispose()
+        async with engine.begin() as verbindung:
+            await verbindung.execute(text("DROP ROLE gs_bot_test"))

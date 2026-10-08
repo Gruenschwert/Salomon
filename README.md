@@ -2,11 +2,12 @@
 
 Interner KI-Assistent der Grünschwert GmbH (Canasups, Kiffkraut). Bedienung per Telegram, Claude als Gehirn, Tools für Shopify und Asana.
 
-Die verbindlichen Vorgaben stehen in [BAUPLAN.md](BAUPLAN.md) (Phase 0 und 1), [ASANA_TOOL.md](ASANA_TOOL.md) (Asana-Assistent und Foto-Eingang) und [ASANA_TOOL_ERWEITERUNG.md](ASANA_TOOL_ERWEITERUNG.md) (Asana-Erweiterung). Alle drei sind umgesetzt.
+Die verbindlichen Vorgaben stehen in [BAUPLAN.md](BAUPLAN.md) (Phase 0 und 1), [ASANA_TOOL.md](ASANA_TOOL.md) (Asana-Assistent und Foto-Eingang) und [ASANA_TOOL_ERWEITERUNG.md](ASANA_TOOL_ERWEITERUNG.md) (Asana-Erweiterung) und [MEHRBENUTZER.md](MEHRBENUTZER.md) (mehrere Personen, Rollen, Datentrennung, Kosten, Modellstufen). Alle vier sind umgesetzt.
 
 ## Was der Bot kann
 
-- Antwortet nur Telegram-Nutzern aus der Whitelist. Alle anderen werden ohne Antwort ignoriert und im Audit-Log als `unbekannt` vermerkt.
+- Antwortet nur Personen, die ein Admin angelegt hat. Alle anderen werden ohne Antwort ignoriert und im Audit-Log als `unbekannt` vermerkt.
+- Mehrere Personen mit Rollen und Rechten, je eigenem Verlauf, eigenen Notizen, eigenem Asana-Zugang und eigenem Kostenlimit. Details unter [Mehrere Personen](#mehrere-personen) und [Datenschutz](#datenschutz).
 - `shopify_lagerbestand`: Bestand je Lagerort, Suche nach Produktname oder SKU.
 - `shopify_offene_bestellungen`: offene Bestellungen, optional nur ohne Tracking, höchstens 20.
 - `demo_notiz`: speichert eine Notiz, aber erst nach Klick auf ✅. Dient nur dem Test des Freigabe-Flows.
@@ -15,8 +16,8 @@ Die verbindlichen Vorgaben stehen in [BAUPLAN.md](BAUPLAN.md) (Phase 0 und 1), [
 - Fotos von Papierplänen lesen und daraus einen Änderungssatz vorschlagen.
 - Fotos und Dateien aus dem Chat an Aufgaben oder Projekte anhängen, Anhänge (Bilder, PDFs) aus Asana lesen.
 - Benutzerdefinierte Felder, Vorlagen, Kopien, Mitglieder, Teams, Zeiterfassung, Statusmeldungen, Projekt-Briefing, Portfolios und Ziele. Übersicht unter [Was der Bot in Asana kann](#was-der-bot-in-asana-kann).
-- `/status` (nur Admins): Version, Uptime, Kosten heute, offene Freigaben.
-- Jeder Tool-Aufruf steht im `audit_log`, der Verbrauch je Tag und Nutzer in `usage`.
+- `/status` (nur Admins): Version, Uptime, Kosten heute, eigene offene Freigaben.
+- Jeder Tool-Aufruf steht im `audit_log`, jede Antwort des Modells mit Modell, Tokens und Kosten in `usage`.
 
 ## Deploy auf dem Server
 
@@ -30,7 +31,8 @@ Voraussetzung: Ubuntu 24.04 mit Docker und Docker Compose v2. Es werden keine Po
 | Eigene Telegram-ID | Telegram, z. B. Chat mit `@userinfobot` | Zahl, nicht der Nutzername |
 | Anthropic-API-Key | Anthropic Console | |
 | Shopify-Token je Shop | Shopify-Admin → Apps → App entwickeln → Custom App | **Nur Leserechte:** `read_products`, `read_inventory`, `read_locations`, `read_orders` |
-| Asana Personal Access Token | Asana → Profilbild → Einstellungen → Apps → Entwicklerkonsole → „Neues Zugriffstoken“ | Der Bot kann alles, was dieses Asana-Konto darf. Am besten ein eigenes Konto mit Zugriff nur auf die nötigen Teams |
+| Asana Personal Access Token | Asana → Profilbild → Einstellungen → Apps → Entwicklerkonsole → „Neues Zugriffstoken“ | Jede Person legt ihren eigenen an und verbindet ihn mit `/verbinden asana`. Der Bot kann für sie alles, was ihr Asana-Konto darf |
+| Hauptschlüssel für Zugangsdaten | `python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"` | Als `SECRETS_MASTER_KEY` in `.env`. Zusätzlich an einem zweiten sicheren Ort aufbewahren: Ohne ihn sind die gespeicherten Zugänge verloren |
 
 Jeder Admin muss dem Bot einmal eine Nachricht schreiben, sonst kann Telegram ihm keine Alarme zustellen.
 
@@ -48,10 +50,12 @@ Alle leeren Werte in `.env` ausfüllen. Zu beachten:
 - `POSTGRES_PASSWORD`: nur Buchstaben und Ziffern verwenden. Das Passwort wird in `DATABASE_URL` eingesetzt; Sonderzeichen wie `@`, `:` oder `/` machen die URL ungültig.
 - `TELEGRAM_ADMIN_USER_IDS` muss eine Teilmenge von `TELEGRAM_ALLOWED_USER_IDS` sein, sonst startet die App nicht.
 - `SHOPIFY_*_DOMAIN`: die `…myshopify.com`-Adresse des Shops. `SHOPIFY_API_VERSION` im Format `JJJJ-MM` (aktuelle stabile Version laut Shopify).
-- `ASANA_*` und `PHOTO_MAX_MB`: siehe [Asana](#asana). Ohne `ASANA_TOKEN` melden die Asana-Tools „nicht konfiguriert“, alles andere läuft normal.
+- `SECRETS_MASTER_KEY`: verschlüsselt die persönlichen Zugänge, siehe [Zugänge pro Person](#zugänge-pro-person). Ohne ihn gibt es kein `/verbinden`.
+- `ASANA_*` und `PHOTO_MAX_MB`: siehe [Asana](#asana). `ASANA_TOKEN` ist nur noch der Zugang des ersten Admins.
+- `MODEL_EINFACH`, `MODEL_STANDARD`, `MODEL_KOMPLEX`: siehe [Modellstufen](#modellstufen). Ein vorhandenes `MODEL_DEFAULT` gilt weiter als Standardstufe, solange `MODEL_STANDARD` leer ist.
 - `ANTHROPIC_WORKSPACE_ID` ist optional. Ist sie gesetzt, geht sie bei jedem Claude-Aufruf als Header `anthropic-workspace-id` mit.
 - In `.env` stehen Kommentare immer in eigenen Zeilen, nie hinter einem Wert.
-- `PRICE_*` und `USD_EUR_RATE`: Grundlage der Kostenrechnung. Die Preise müssen zu `MODEL_DEFAULT` passen; bei einem Modellwechsel beides anpassen.
+- `USD_EUR_RATE`: fester Umrechnungskurs für die Kostenrechnung. `PRICE_*` gilt nur noch für Modelle, deren Preis nicht in `app/agent/preise.py` steht.
 - `.env` wird nie committet (steht in `.gitignore`).
 
 Ein Shop ohne Domain/Token ist erlaubt: Das Tool meldet dann „nicht konfiguriert“.
@@ -63,7 +67,7 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
-Beim Start führt die App erst `alembic upgrade head` aus, dann startet der Bot. Auch ein Update mit neuen Tabellen (zuletzt `asana_operationen`) braucht deshalb keinen eigenen Schritt. Die Admins erhalten die Meldung „gs-assistant … wurde gestartet“.
+Beim Start führt die App erst `alembic upgrade head` aus, dann startet der Bot. Auch ein Update mit neuen Tabellen braucht deshalb keinen eigenen Schritt; die Migrationen lassen sich beliebig oft ausführen. Die Admins erhalten die Meldung „gs-assistant … wurde gestartet“.
 
 Damit der Bot einen Server-Neustart übersteht, muss Docker beim Booten starten (`sudo systemctl enable docker`); die Container haben `restart: unless-stopped`.
 
@@ -86,15 +90,146 @@ docker compose exec db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > back
 docker compose exec db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "select zeit, tool_name, fehler from audit_log order by id desc limit 20"'
 ```
 
-Whitelist ändern: `.env` anpassen, dann `docker compose up -d`. Entfernte IDs werden beim Start deaktiviert.
+Personen verwaltet ein Admin im Chat, siehe [Mehrere Personen](#mehrere-personen). Die Listen in `.env` gelten nur für die erste Einrichtung; Konten aus `TELEGRAM_ADMIN_USER_IDS` werden bei jedem Start als Admin sichergestellt.
 
-Ist das Tageslimit (`DAILY_COST_LIMIT_EUR`, gilt für alle Nutzer zusammen) erreicht, lehnt der Bot neue Anfragen bis zum nächsten Tag (Europe/Berlin) ab. Bei 80 % erhalten die Admins eine Warnung.
+## Mehrere Personen
+
+Wer der Bot vor sich hat, bestimmt allein der Server aus der Telegram-ID. Das Modell bekommt nie eine Nutzer-ID als Parameter und kann sich nicht als jemand anderes ausgeben.
+
+### Update von einer älteren Version
+
+`git pull && docker compose up -d --build` genügt. Beim ersten Start mit dieser Version passiert von selbst:
+
+- Alle bisherigen Konten bleiben. Admins behalten die Rolle `admin`, alle anderen bekommen `mitarbeiter`.
+- Verlauf, Freigaben und Verbrauch bleiben erhalten.
+- Der Bot arbeitet in der Datenbank ab sofort als eingeschränkte Rolle `app_laufzeit`; dafür ist kein neues Passwort nötig.
+- Ist `SECRETS_MASTER_KEY` gesetzt, wird `ASANA_TOKEN` einmalig verschlüsselt dem ersten Admin (kleinste ID in `TELEGRAM_ADMIN_USER_IDS`) zugeordnet.
+- Ist `SECRETS_MASTER_KEY` noch leer, nutzt nur dieser erste Admin weiter `ASANA_TOKEN`. Alle anderen bekommen bei Asana-Fragen den Hinweis, dass die Zugänge noch nicht eingerichtet sind, und `/verbinden` ist abgeschaltet.
+
+Empfohlen direkt nach dem Update: `SECRETS_MASTER_KEY` erzeugen (Befehl in der Tabelle oben), in `.env` eintragen, `docker compose up -d`.
+
+Die Variablen `ASANA_DELETE_ROLES`, `ASANA_API_AUFRUF_ROLES` und `ASANA_TEAM_VERWALTUNG_ROLES` gibt es nicht mehr. Stehen sie noch in `.env`, werden sie ignoriert; was jemand darf, regeln die Rollen.
+
+### Rollen und Rechte
+
+| Rolle | Darf |
+|---|---|
+| `mitarbeiter` | Asana lesen und ändern (mit Freigabe), eigene Mails |
+| `buchhaltung` | Buchhaltung lesen und schreiben, eigene Mails, Asana lesen |
+| `apotheken_updates` | Apotheken-Daten lesen und schreiben, Bestand lesen, Asana lesen |
+| `admin` | Alles, dazu Personen, Rollen und Limits verwalten und die Kosten aller sehen |
+
+Eine Person kann mehrere Rollen haben; es gilt die Vereinigung. Zu Buchhaltung, Apotheken, Mail, Bestand und Klaviyo gibt es die Rechte schon, die Tools dazu noch nicht. In Asana löschen, Teams verwalten und den allgemeinen API-Aufruf nutzen dürfen nur Admins. Die Zuordnung steht in `app/auth/rechte.py`.
+
+Rechte wirken an zwei Stellen: Das Modell sieht nur die Tools, die die Person nutzen darf, und vor jeder Ausführung wird noch einmal geprüft. Auch ein Admin kommt nicht an Verlauf, Notizen, Zugänge oder Freigaben anderer; ein solches Recht gibt es nicht.
+
+### Befehle
+
+Befehle laufen direkt im Bot und nie über das Modell. `/hilfe` zeigt nur, was die Person nutzen darf.
+
+| Befehl | Wirkung |
+|---|---|
+| `/start`, `/hilfe` | Begrüßung, Liste der Befehle |
+| `/verbinden asana` | Eigenen Asana-Token hinterlegen. Der Bot fragt danach, prüft ihn bei Asana und löscht die Nachricht mit dem Token aus dem Chat |
+| `/trennen asana`, `/verbunden` | Zugang entfernen, verbundene Dienste anzeigen (nur Namen) |
+| `/kosten [1\|3\|7\|30]` | Eigene Kosten im Zeitraum, nach Modell und Grund der Modellwahl |
+| `/modell einfach\|standard\|komplex\|auto` | Modellstufe festlegen, gilt bis zum nächsten Neustart des Bots |
+| `/profil` | Name, Anrede (du/Sie) und Zeitzone anzeigen oder ändern |
+| `/merken <text>`, `/gemerkt` | Persönliche Notiz speichern, Notizen anzeigen |
+| `/vergessen` | Eigenen Verlauf und eigene Notizen löschen |
+| `/nutzer` (Admin) | Alle Personen mit Rollen |
+| `/nutzer_neu <telegram_id> <name>` (Admin) | Person anlegen, Rolle `mitarbeiter` |
+| `/rolle <name> +rolle` oder `-rolle` (Admin) | Rolle geben oder nehmen. Der letzte Admin lässt sich nicht entfernen |
+| `/sperren <name>`, `/entsperren <name>` (Admin) | Zugang sperren oder wieder öffnen |
+| `/limit <name> <euro>` (Admin) | Tageslimit einer Person; `standard` setzt es zurück |
+| `/kosten <tage> alle` (Admin) | Kosten aller Personen, nur Summen und Zahlen |
+
+Befehle, die etwas an anderen Personen ändern, fragen vor dem Ausführen mit Ja/Nein nach.
+
+### Zugänge pro Person
+
+Jede Person verbindet ihren eigenen Asana-Token. Einen gemeinsamen Token als Rückfall gibt es nicht; wer nichts verbunden hat, bekommt „Verbinde zuerst deinen Asana-Zugang mit /verbinden asana.“ `ASANA_WORKSPACE_GID` und `ASANA_DEFAULT_TEAM_GID` bleiben gemeinsame Konfiguration.
+
+Die Tokens liegen mit AES-256-GCM verschlüsselt in `user_secrets`. Jede Person hat einen eigenen Schlüssel, abgeleitet aus `SECRETS_MASTER_KEY` und ihrer ID. Der Token wird nie geloggt, nie im Verlauf gespeichert und nie an das Modell geschickt.
+
+Schlüssel wechseln:
+
+1. Neuen Schlüssel erzeugen (Befehl in der Tabelle oben).
+2. In `.env` den bisherigen Wert nach `SECRETS_MASTER_KEY_ALT` kopieren, den neuen in `SECRETS_MASTER_KEY` eintragen, `SECRETS_MASTER_KEY_VERSION` um 1 erhöhen.
+3. `docker compose run --rm app python -m scripts.schluessel_rotieren`
+4. `SECRETS_MASTER_KEY_ALT` leeren, `docker compose up -d`.
+
+### Kosten und Limits
+
+- Jede Antwort des Modells wird einzeln gebucht: Person, Modell, Eingabe-, Ausgabe- und Cache-Tokens, Kosten in USD und EUR, Grund der Modellwahl. Die Preise je Modell stehen in `app/agent/preise.py` (Stand der offiziellen Preisliste vom 08.10.2026) und sind bei Preisänderungen dort anzupassen.
+- `DAILY_COST_LIMIT_EUR` (Standard 5) gilt pro Person und Tag, `/limit` ändert es für eine Person. Bei 80 % bekommt die Person einmal eine Warnung, bei 100 % lehnt der Bot ihre Anfragen bis zum nächsten Tag (Europe/Berlin) ab.
+- `DAILY_COST_LIMIT_TOTAL_EUR` (Standard 20) gilt für alle zusammen. Bei 80 % werden die Admins gewarnt, bei 100 % sind alle gesperrt.
+- `/kosten` funktioniert auch bei erreichtem Limit.
+
+### Modellstufen
+
+| Stufe | Variable | Standard | Wann |
+|---|---|---|---|
+| einfach | `MODEL_EINFACH` | `claude-haiku-4-5-20251001` | Kurze Lesefrage (unter 200 Zeichen, Stichwörter wie „Status“, „Wie viel“, „Zeig mir“, „Liste“) ohne Änderungswunsch |
+| standard | `MODEL_STANDARD` | `claude-sonnet-5-5` | Alles andere |
+| komplex | `MODEL_KOMPLEX` | `claude-opus-5-5` | Foto oder PDF, mehr als 1500 Zeichen, Stichwörter wie „Analyse“, „Auswertung“, „Projektplan“, „Konzept“, „Buchhaltung“, „Vergleich“, sowie Tools mit dem Kennzeichen `komplex` |
+
+- Die Wahl trifft `waehle_modell` in `app/agent/router.py` nach festen Regeln, ohne zusätzlichen KI-Aufruf. Die Stichwortlisten sind dort Konstanten.
+- Scheitert das einfache Modell (leere Antwort, ungültiger Tool-Aufruf) oder will es etwas ändern, läuft die Anfrage genau einmal neu mit dem Standardmodell. Beide Läufe werden gebucht.
+- Meldet Anthropic ein Modell als nicht verfügbar, nimmt der Bot das Standardmodell und schreibt eine Warnung ins Log. Für das Standardmodell selbst gibt es keinen Ersatz.
+- Der feste Teil des System-Prompts und die Tool-Definitionen liegen im Prompt-Cache von Anthropic (fünf Minuten). Folgeanfragen und die Runden innerhalb einer Anfrage lesen diesen Teil zu einem Bruchteil des Eingabepreises. Jede Stufe und jede Rechte-Kombination hat ihren eigenen Cache.
+
+## Datenschutz
+
+### Was gespeichert wird
+
+| Daten | Tabelle | Wie lange |
+|---|---|---|
+| Gesprächsverlauf (Texte der Fragen und Antworten, keine Fotos, keine Tool-Ergebnisse) | `messages` | `MESSAGE_RETENTION_DAYS` (Standard 90 Tage), dann täglich gelöscht; sofort mit `/vergessen` |
+| Persönliche Notizen | `user_memory` | Bis `/vergessen` |
+| Zugangsdaten (verschlüsselt) | `user_secrets` | Bis `/trennen` |
+| Freigaben mit den vorgeschlagenen Änderungen | `approvals`, `asana_operationen` | Unbegrenzt |
+| Tool-Aufrufe: Zeit, Tool, gekürzte Parameter, Kurzergebnis | `audit_log` | Unbegrenzt |
+| Verbrauch: Modell, Tokens, Kosten, Grund der Modellwahl | `usage` | Unbegrenzt |
+| Verweise auf Dateien aus dem Chat, ohne Inhalt | `telegram_dateien` | Unbegrenzt |
+| Name, Telegram-ID, Rollen, Anrede, Zeitzone, Limit | `users`, `user_roles` | Solange das Konto besteht |
+
+Fotos und Dateien selbst speichert der Bot nicht. Eine automatische Löschfrist gibt es bisher nur für den Verlauf.
+
+### Wer es lesen kann
+
+- Jede Person nur ihre eigenen Daten. Das erzwingt die Datenbank selbst (Row Level Security auf `messages`, `user_memory`, `user_secrets`, `approvals`, `asana_operationen`, `notizen`, `telegram_dateien`, `audit_log`), nicht nur der Code des Bots. Eine Abfrage ohne Nutzerkontext liefert null Zeilen.
+- Admins sehen im Bot von anderen nur Namen, Rollen, Limits und Kostensummen, keine Inhalte.
+- Die Logs enthalten keine Nachrichteninhalte und keine Zugangsdaten. Alle Secrets aus `.env` werden in jeder Log-Zeile durch `***` ersetzt, auch die Adresse der Telegram-API mit dem Bot-Token. `httpx` und `telegram` loggen erst ab WARNING, Datenbankfehler ohne die Werte der Abfrage.
+- Außerhalb des Servers: Anthropic erhält bei jeder Anfrage den Verlauf der Person, ihre Notizen, die Frage und die Tool-Ergebnisse. Telegram transportiert alle Nachrichten; Bot-Chats sind nicht Ende-zu-Ende-verschlüsselt. Asana und Shopify sehen die Aufrufe mit dem jeweiligen Token.
+
+### Die Grenze
+
+Wer Root-Zugriff auf den Server hat und den Hauptschlüssel kennt, kann technisch alles entschlüsseln und lesen: Der Schlüssel steht in `.env`, und der Eigentümer der Datenbank umgeht die Row Level Security, ebenso ein Backup mit `pg_dump`. Der Schutz gilt gegenüber dem Bot, seinen Tools und allen Bot-Rollen einschließlich Admin, nicht gegenüber der Person, die den Server betreibt. Eine Stufe weiter (Schlüssel aus einem persönlichen Passwort ableiten) ist möglich, aber nicht gebaut.
+
+Der Bot meldet sich standardmäßig mit dem Login aus `DATABASE_URL` an und wechselt bei jeder Verbindung in die eingeschränkte Rolle `app_laufzeit`. Das schützt vor Fehlern im Bot. Wer zusätzlich ausschließen will, dass der Prozess je als Eigentümer arbeitet, legt einen eigenen Login an und trägt ihn als `APP_DATABASE_URL` ein:
+
+```
+docker compose exec db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "CREATE ROLE gs_bot LOGIN PASSWORD '"'"'<passwort>'"'"' IN ROLE app_laufzeit"'
+```
+
+Die Migrationen beim Start laufen weiter über `DATABASE_URL`.
+
+### Organisatorisch nötig
+
+Das löst der Code nicht, es gehört aber vor den Betrieb mit mehreren Mitarbeitern:
+
+- Vertrag zur Auftragsverarbeitung mit Anthropic (Verarbeitung der Gespräche) und mit Hetzner (Server). Bei Anthropic zusätzlich die Übermittlung in ein Drittland prüfen.
+- Die Mitarbeiter informieren: was der Bot speichert, wie lange, wer es lesen kann, und dass Gespräche an Anthropic gehen.
+- Den Bot ins Verzeichnis der Verarbeitungstätigkeiten aufnehmen.
+
+Das ist keine Rechtsberatung; die Punkte stammen aus der Vorgabe und sollten mit dem Datenschutzbeauftragten abgestimmt werden.
 
 ## Asana
 
 ### Einrichten
 
-1. Personal Access Token anlegen (siehe Tabelle oben) und als `ASANA_TOKEN` in `.env` eintragen.
+1. Personal Access Token anlegen (siehe Tabelle oben) und im Chat mit `/verbinden asana` hinterlegen. Der erste Admin kann ihn stattdessen als `ASANA_TOKEN` in `.env` eintragen; er wird beim Start übernommen.
 2. `ASANA_WORKSPACE_GID` leer lassen, wenn das Konto genau einen Workspace sieht. Sieht es mehrere, antwortet der Bot beim ersten Asana-Aufruf mit einer Fehlermeldung, die Namen und GIDs aller Workspaces nennt. Die passende GID dann eintragen.
 3. `ASANA_DEFAULT_TEAM_GID` nur setzen, wenn der Workspace eine Organisation ist. Dort braucht jedes neue Projekt ein Team. Die GID steht in der Adresse der Team-Seite in Asana.
 4. `docker compose up -d`, dann im Chat „Welche Asana-Projekte haben wir?“ fragen.
@@ -104,12 +239,9 @@ Ist das Tageslimit (`DAILY_COST_LIMIT_EUR`, gilt für alle Nutzer zusammen) erre
 | `ASANA_MAX_OPS_PER_CHANGESET` | 100 | Größere Sätze werden abgelehnt, Claude teilt sie dann auf |
 | `ASANA_MAX_DELETES_PER_CHANGESET` | 20 | Höchstzahl Löschoperationen je Satz |
 | `ASANA_DELETE_ENABLED` | true | `false` schaltet Löschen ganz ab, auch für Admins |
-| `ASANA_DELETE_ROLES` | admin | Rollen, die Löschungen vorschlagen dürfen (`admin`, `user`, Komma-getrennt) |
 | `PHOTO_MAX_MB` | 5 | Größere Fotos lehnt der Bot ab |
 | `ASANA_ATTACHMENT_VIEW_MAX_MB` | 5 | Größere Anhänge lädt der Bot nicht zum Lesen herunter |
 | `ASANA_API_AUFRUF_ENABLED` | true | `false` schaltet den allgemeinen API-Aufruf ganz ab |
-| `ASANA_API_AUFRUF_ROLES` | admin | Rollen, die den allgemeinen API-Aufruf nutzen dürfen |
-| `ASANA_TEAM_VERWALTUNG_ROLES` | admin | Rollen, die Teams anlegen, ändern und Mitglieder verwalten dürfen |
 | `MAX_OUTPUT_TOKENS` | 8000 | Ein Änderungssatz ist Claudes Ausgabe. Bei kleineren Werten passen große Pläne nicht in einen Satz. Unter 4000 warnt der Bot beim Start |
 | `AGENT_MAX_ROUNDS` | 25 | Höchstzahl der Runden je Nachricht. Danach meldet der Bot den Zwischenstand; mit „weiter“ geht es dort weiter |
 
@@ -167,11 +299,11 @@ Was nicht geht, weil die Asana-Schnittstelle es nicht anbietet (Stand Oktober 20
 
 ### Allgemeiner API-Aufruf
 
-Für alles, wofür es keine eigene Funktion gibt, kann Claude mit `asana_api_aufruf` einen beliebigen Endpunkt unter `https://app.asana.com/api/1.0` ansprechen. Standardmäßig dürfen das nur Admins.
+Für alles, wofür es keine eigene Funktion gibt, kann Claude mit `asana_api_aufruf` einen beliebigen Endpunkt unter `https://app.asana.com/api/1.0` ansprechen. Das dürfen nur Admins.
 
 - GET läuft sofort, liefert höchstens eine Seite und wird gekürzt.
 - POST und PUT zeigen Methode, Pfad, Begründung und Body als Vorschau und laufen erst nach ✅.
-- DELETE braucht zusätzlich die zweite Bestätigung und die Lösch-Rolle.
+- DELETE braucht zusätzlich die zweite Bestätigung und das Recht zu löschen.
 - Der Pfad darf nur aus einfachen Segmenten bestehen (`/tasks/123/stories`). Host, `..`, Fragezeichen und Sonderzeichen werden abgelehnt, bevor etwas gesendet wird. Den Token setzt nur der Client.
 - Immer gesperrt: Änderungen an Nutzern, Workspaces und Workspace-Mitgliedschaften, Rollen, Budgets, Zugriffsanfragen, Webhooks, Organisations- und Massenexporte, das Audit-Log der Organisation, Sammelaufrufe (`/batch`), Token- und Anmelde-Endpunkte sowie Datei-Uploads. Die Liste steht als Konstante in `app/tools/asana_ops_api.py` und ist per Test abgesichert.
 - Jeder Aufruf steht mit Pfad und Body im `audit_log`.
@@ -203,7 +335,7 @@ docker compose exec db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "select
 - Als Löschung zählen auch Anhänge, Felder, Portfolios, Ziele, Statusmeldungen, Kommentare, Briefings, Zeiteinträge, das Entfernen von Team-Mitgliedern und jeder DELETE über den allgemeinen API-Aufruf.
 - Anhänge lädt der Bot von der Adresse, die Asana nennt, ohne den Asana-Token mitzuschicken.
 - Gelöscht wird nur mit einer GID aus einem Lese-Tool, nie nach Name und nie über einen Platzhalter. Die Löschregeln werden beim Vorschlagen und noch einmal beim Ausführen geprüft.
-- Alle Secrets (Telegram, Anthropic, Asana, Shopify, Datenbank-Passwort) werden in jeder Log-Zeile durch `***` ersetzt, auch in Fehlerausgaben. `httpx` und `telegram` loggen erst ab WARNING.
+- Alle Secrets (Telegram, Anthropic, Asana, Shopify, Datenbank-Passwort, Hauptschlüssel) werden in jeder Log-Zeile durch `***` ersetzt, auch in Fehlerausgaben. `httpx` und `telegram` loggen erst ab WARNING.
 - Texte aus Asana und aus Fotos gelten für Claude als Daten, nicht als Anweisungen.
 
 ## Entwicklung
@@ -214,9 +346,9 @@ python -m venv .venv
 ruff check . && ruff format --check . && pytest
 ```
 
-Die Tests brauchen weder Docker noch Zugangsdaten: Sie laufen gegen SQLite im Speicher, Anthropic, Shopify und Asana sind Attrappen. Die CI (GitHub Actions) führt bei jedem Push dieselben drei Befehle aus.
+Die Tests brauchen weder Docker noch Zugangsdaten. Anthropic, Shopify und Asana sind Attrappen. Die Datenbank ist ein echtes PostgreSQL: Ohne weitere Angabe startet `pgserver` (Entwicklungsabhängigkeit) eines im Hintergrund; mit `TEST_DATABASE_URL` laufen die Tests gegen eine eigene, leere Datenbank. Der ganze Lauf dauert gut zwei Minuten. Die CI (GitHub Actions) führt bei jedem Push dieselben drei Befehle aus.
 
-Neues Tool: eine Datei in `app/tools/` mit einer Unterklasse von `BasisTool` anlegen. Die Registry findet sie automatisch. Mit `schreibend = True` läuft das Tool nur nach Freigabe und braucht eine `vorschau()`. Muss die Vorschau erst etwas nachlesen, überschreibt das Tool stattdessen das asynchrone `bereite_vor()`. Optional sind `ergebnis_text()` für eine eigene Ergebnis-Meldung und `zweite_bestaetigung()` für eine zweite Rückfrage.
+Neues Tool: eine Datei in `app/tools/` mit einer Unterklasse von `BasisTool` anlegen. Die Registry findet sie automatisch. Mit `schreibend = True` läuft das Tool nur nach Freigabe und braucht eine `vorschau()`. `erforderliche_rechte` legt fest, wer es sieht und nutzen darf; `komplex = True` schaltet beim Aufruf auf das starke Modell. Persönliche Daten liest und schreibt ein Tool nur über `db_sitzung(session_fabrik, aktueller_nutzer.get())`. Muss die Vorschau erst etwas nachlesen, überschreibt das Tool stattdessen das asynchrone `bereite_vor()`. Optional sind `ergebnis_text()` für eine eigene Ergebnis-Meldung und `zweite_bestaetigung()` für eine zweite Rückfrage.
 
 Neue Asana-Operation: eine Klasse mit `vorschau` und `ausfuehren` in einem der Module `app/tools/asana_ops_*.py`, registriert über `@registriere`. Das Modul trägt seine Felder in `ZUSATZ_SCHEMA` und `ZUSATZ_BESCHREIBUNG` ein und wird in `asana_schreiben.py` importiert. Feldnamen und Bodys stammen aus der API-Referenz von Asana, nicht aus dem Gedächtnis.
 
@@ -224,7 +356,7 @@ Neue Asana-Operation: eine Klasse mit `vorschau` und `ausfuehren` in einem der M
 
 Alle wurden vor der Umsetzung abgestimmt:
 
-- `MODEL_DEFAULT` ist `claude-sonnet-5` statt `claude-sonnet-5-5`, weil es die zweite Modell-ID nicht gibt.
+- `MODEL_DEFAULT` stand in der Vorlage auf `claude-sonnet-5`. Seit MEHRBENUTZER.md heißt die Variable `MODEL_STANDARD` mit dem Standard `claude-sonnet-5-5`; ein gesetztes `MODEL_DEFAULT` gilt weiter.
 - Zusätzliche Variablen `PRICE_INPUT_USD_PER_MTOK`, `PRICE_OUTPUT_USD_PER_MTOK`, `USD_EUR_RATE` für die Kostenrechnung in Euro.
 - Zusätzliche Tabelle `notizen` für `demo_notiz`.
 - `MAX_OUTPUT_TOKENS` steht standardmäßig auf 8000 statt 1500, damit ein großer Asana-Änderungssatz in eine Antwort passt.
@@ -244,6 +376,13 @@ Festlegungen zu ASANA_TOOL_ERWEITERUNG.md:
 - `wiederholung_setzen` nimmt keine frei beschriebene Wiederholung an, nur die einer Vorlage-Aufgabe.
 - Eine neue Genehmigung legt `aufgabe_anlegen` mit `genehmigung=true` an; `aufgabe_genehmigung` setzt den Stand.
 
+Festlegungen zu MEHRBENUTZER.md:
+
+- Der Bot bekommt keinen eigenen Datenbank-Login, sondern wechselt mit dem vorhandenen in die Rolle `app_laufzeit`. Nur so läuft das Update ohne manuellen Schritt; `APP_DATABASE_URL` ist die strengere Variante.
+- Ohne `SECRETS_MASTER_KEY` nutzt der erste Admin weiter `ASANA_TOKEN` aus `.env`, damit nach dem Update nichts ausfällt. Für alle anderen gibt es keinen Rückfall.
+- Das einfache Modell eskaliert auch dann auf das Standardmodell, wenn es ein schreibendes Tool aufrufen will. Die Vorgabe nennt für die einfache Stufe nur lesende Tools.
+- Zusätzlich zur Vorgabe schaltet ein Tool mit `komplex = True` (bisher nur das Lesen von Asana-Anhängen) für den Rest der Anfrage auf das starke Modell.
+
 ## Bekannte Grenzen
 
 - Im Gesprächsverlauf wird je Runde nur der Text gespeichert, keine Tool-Ergebnisse. Claude kennt in der nächsten Nachricht also seine eigene Antwort, nicht die Rohdaten dahinter. Ob eine Freigabe erteilt wurde, erfährt Claude nur bei Asana-Änderungssätzen, nicht bei `demo_notiz`.
@@ -257,6 +396,9 @@ Festlegungen zu ASANA_TOOL_ERWEITERUNG.md:
 - Beim Duplizieren eines Projekts lässt sich kein Team angeben: Die API-Referenz kennt dafür kein Feld, die Kopie landet im Team des Originals.
 - Die Wiederholungsregel ist in der Asana-Doku nicht beschrieben. Lesen und Übertragen sind deshalb ungeprüft, bis du sie einmal live ausprobiert hast.
 - Portfolios zeigt Asana über einen persönlichen Token nur an, wenn sie dem Token-Inhaber gehören.
-- `MODEL_CHEAP` ist konfiguriert, wird in Phase 0/1 aber noch nirgends verwendet.
+- `MODEL_CHEAP` wird nicht mehr gelesen; an seine Stelle tritt `MODEL_EINFACH`.
+- `/modell` gilt nur bis zum nächsten Neustart des Bots.
+- Der Router arbeitet mit Stichwörtern. Eine schwere Frage ohne eines dieser Wörter läuft auf dem Standardmodell; `/modell komplex` hilft dann.
+- Für das Audit-Log, die Freigaben und den Verbrauch gibt es keine automatische Löschfrist.
 - Der Filter „ohne Tracking“ prüft die 50 neuesten offenen Bestellungen; gibt es mehr, weist das Ergebnis darauf hin. Shopify liefert mit `read_orders` standardmäßig nur Bestellungen der letzten 60 Tage.
 - Abgelaufene Freigaben werden erst beim Klick als `abgelaufen` markiert; `/status` zählt sie trotzdem nicht mehr mit.
