@@ -12,6 +12,8 @@ from types import ModuleType
 
 import app.tools
 from app.auth.kontext import NutzerKontext
+from app.mail.lauf import aktueller_mail_lauf
+from app.mail.schutz import umrande
 from app.medien import PDF
 from app.observability.audit import protokolliere
 from app.tools.base import (
@@ -21,6 +23,7 @@ from app.tools.base import (
     Tool,
     ToolFehler,
     ToolKontext,
+    Umgebung,
     aktueller_nutzer,
 )
 
@@ -52,17 +55,20 @@ class Registry:
     def hole(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def api_definitionen(self, nutzer: NutzerKontext) -> list[dict]:
+    def api_definitionen(
+        self, nutzer: NutzerKontext, umgebung: Umgebung | None = None
+    ) -> list[dict]:
         """Tool-Liste für Claude: nur, wofür die Person alle Rechte hat. Was jemand nicht darf,
         existiert für das Modell nicht. Die Reihenfolge ist stabil (nach Namen sortiert)."""
+        umgebung = umgebung or Umgebung()
         return [
             {
                 "name": tool.name,
                 "description": tool.beschreibung,
-                "input_schema": tool.parameter_schema,
+                "input_schema": tool.schema_fuer(umgebung),
             }
             for tool in self._tools.values()
-            if nutzer.darf(*tool.erforderliche_rechte)
+            if nutzer.darf(*tool.erforderliche_rechte) and tool.verfuegbar_fuer(umgebung)
         ]
 
 
@@ -100,6 +106,14 @@ def kuerze(text: str, max_zeichen: int = MAX_ERGEBNIS_ZEICHEN) -> str:
     return text[: max_zeichen - len(GEKUERZT_MARKE)] + GEKUERZT_MARKE
 
 
+def audit_angaben(tool: Tool, params: object, daten: dict | None) -> tuple[dict, str | None]:
+    """Was vom Aufruf ins Audit-Log kommt: in der Regel die Parameter, bei Tools mit eigener
+    Angabe (Mail) nur deren Metadaten. Der zweite Wert ersetzt den Ergebnistext."""
+    params = params if isinstance(params, dict) else {}
+    eigene = tool.audit(params, daten) if hasattr(tool, "audit") else None
+    return eigene if eigene is not None else (params, None)
+
+
 async def fuehre_tool_aus(
     tool: Tool, params: dict, user: NutzerKontext, kontext: ToolKontext
 ) -> ToolErgebnis:
@@ -111,11 +125,17 @@ async def fuehre_tool_aus(
         # Ein Tool kann Claude eine Datei zum Ansehen mitgeben. Sie geht als eigener Block an
         # Claude und taucht weder im Text noch im Audit-Log auf.
         ansicht = daten.pop(ANSICHT_SCHLUESSEL, None) if isinstance(daten, dict) else None
+        text = kuerze(
+            json.dumps(daten, ensure_ascii=False, default=str),
+            getattr(tool, "max_ergebnis_zeichen", None) or MAX_ERGEBNIS_ZEICHEN,
+        )
+        if getattr(tool, "mailinhalt", False):
+            # Mailinhalt kommt von außen: klar umrandet, und für Rückfragen vorgemerkt.
+            text = umrande(text)
+            if (lauf := aktueller_mail_lauf.get()) is not None:
+                lauf.merke_kontext(text)
         ergebnis = ToolErgebnis(
-            kuerze(
-                json.dumps(daten, ensure_ascii=False, default=str),
-                getattr(tool, "max_ergebnis_zeichen", None) or MAX_ERGEBNIS_ZEICHEN,
-            ),
+            text,
             daten=daten,
             bloecke=(_ansicht_block(ansicht),) if ansicht else (),
         )
@@ -129,12 +149,13 @@ async def fuehre_tool_aus(
         fehler = type(exc).__name__
     finally:
         aktueller_nutzer.reset(marke)
+    parameter, kurz = audit_angaben(tool, params, ergebnis.daten)
     await protokolliere(
         kontext.session_fabrik,
         user_id=user.id,
         tool_name=tool.name,
-        parameter=params,
-        ergebnis_kurz="" if fehler else ergebnis.text,
+        parameter=parameter,
+        ergebnis_kurz="" if fehler else (ergebnis.text if kurz is None else kurz),
         dauer_ms=int((time.monotonic() - start) * 1000),
         fehler=fehler,
     )

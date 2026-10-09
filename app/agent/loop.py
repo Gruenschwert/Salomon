@@ -13,14 +13,18 @@ from app.agent.prompts import system_bloecke
 from app.agent.router import EINFACH, KOMPLEX, STANDARD, ModellVorgaben, Modellwahl, waehle_modell
 from app.auth.approvals import Freigaben
 from app.auth.kontext import NutzerKontext
+from app.auth.rechte import MAIL_EIGENE
 from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
 from app.config import Settings
 from app.db.session import SessionFabrik
+from app.mail import konten as mail_konten
+from app.mail.lauf import MailLauf, aktueller_mail_lauf
+from app.mail.verbindung import schliesse_lauf
 from app.medien import groesse_text
 from app.observability.audit import protokolliere
 from app.observability.costs import Kosten
-from app.tools.base import BasisTool, ToolFehler, ToolKontext
-from app.tools.registry import Registry, ToolErgebnis, fuehre_tool_aus
+from app.tools.base import BasisTool, ToolFehler, ToolKontext, Umgebung
+from app.tools.registry import Registry, ToolErgebnis, audit_angaben, fuehre_tool_aus
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +89,7 @@ class Agent:
         freigaben: Freigaben,
         kosten: Kosten,
         vorgaben: ModellVorgaben | None = None,
+        kontext: ToolKontext | None = None,
     ) -> None:
         self._settings = settings
         self._vorgaben = vorgaben or ModellVorgaben()
@@ -95,7 +100,7 @@ class Agent:
         self._registry = registry
         self._freigaben = freigaben
         self._kosten = kosten
-        self._kontext = ToolKontext(settings=settings, session_fabrik=session_fabrik)
+        self._kontext = kontext or ToolKontext(settings=settings, session_fabrik=session_fabrik)
 
     async def beantworte(self, nachricht: EingehendeNachricht, user: NutzerKontext) -> Antwort:
         if gesperrt := await self._kosten.limit_erreicht(user.id):
@@ -108,18 +113,29 @@ class Agent:
         anfragen: list[FreigabeAnfrage] = []
         wahl = waehle_modell(nachricht, user, self._vorgaben.hole(user.nutzer_id))
         stand = await self._freigaben.stand(user)
+        # Die eigenen Postfächer der Person: Nur ihre Labels stehen im Schema der Mail-Tools.
+        konten: tuple[str, ...] = ()
+        if user.darf(MAIL_EIGENE):
+            konten = tuple(await mail_konten.labels(self._session_fabrik, user))
+        umgebung = Umgebung(mail_konten=konten)
+        lauf = MailLauf(nutzer_text=nachricht.text or "")
+        marke = aktueller_mail_lauf.set(lauf)
         try:
             try:
-                text = await self._schleife(list(messages), user, anfragen, stand, wahl)
+                text = await self._schleife(list(messages), user, anfragen, stand, wahl, umgebung)
             except _Eskalation as exc:
                 # Einmal mit dem Standardmodell wiederholen. Die Kosten beider Läufe sind
                 # gebucht; Freigaben gab es im ersten Lauf noch keine.
                 log.info("Eskalation von einfach auf standard: %s", exc.grund)
                 wahl = Modellwahl(STANDARD, f"standard: eskaliert von einfach ({exc.grund})")
-                text = await self._schleife(list(messages), user, anfragen, stand, wahl)
+                text = await self._schleife(list(messages), user, anfragen, stand, wahl, umgebung)
         except anthropic.APIError:
             log.exception("Claude-Aufruf fehlgeschlagen")
             return Antwort(text=DIENST_FEHLER_TEXT, freigaben=tuple(anfragen))
+        finally:
+            # Die IMAP-Verbindungen dieser Anfrage sauber schließen.
+            await schliesse_lauf()
+            aktueller_mail_lauf.reset(marke)
         await speichere_austausch(
             self._session_fabrik, nachricht.chat_id, user.id, _verlaufstext(nachricht), text
         )
@@ -132,6 +148,7 @@ class Agent:
         anfragen: list[FreigabeAnfrage],
         freigaben_stand: str = "",
         wahl: Modellwahl | None = None,
+        umgebung: Umgebung | None = None,
     ) -> str:
         settings = self._settings
         wahl = wahl or Modellwahl(STANDARD, "")
@@ -147,7 +164,7 @@ class Agent:
                 await lade_notizen(self._session_fabrik, user),
             ),
         }
-        if tools := self._registry.api_definitionen(user):
+        if tools := self._registry.api_definitionen(user, umgebung):
             # Die Tool-Liste ist je Rechte-Kombination gleich und stabil sortiert; die Marke am
             # letzten Tool legt sie in den Prompt-Cache.
             anfrage["tools"] = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
@@ -288,7 +305,10 @@ class Agent:
                 self._session_fabrik,
                 user_id=user.id,
                 tool_name=name[:100],
-                parameter=params if isinstance(params, dict) else {},
+                # Bei Tools mit Mailinhalt kommen auch hier nur Metadaten ins Audit-Log.
+                parameter=audit_angaben(tool, params, None)[0]
+                if tool is not None
+                else (params if isinstance(params, dict) else {}),
                 fehler="nicht verfügbar" if tool is None else "kein Recht",
             )
             if tool is None:

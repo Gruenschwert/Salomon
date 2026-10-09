@@ -25,6 +25,8 @@ class MailLauf:
     verlauf_hat_mail: bool = False
     # Absender der in diesem Lauf gelesenen Mails, in Lesereihenfolge
     gelesene_absender: list[str] = field(default_factory=list)
+    # True, wenn in diesem Lauf Trefferlisten (Absender, Betreffs) gelesen wurden
+    listen_gelesen: bool = False
     # Adressen, an die eine Antwort auf die gelesenen Mails üblicherweise geht
     antwortweg: set[str] = field(default_factory=set)
     # Tool-Ergebnisse mit Mailinhalt, für den verschlüsselten Verlauf
@@ -49,7 +51,7 @@ class MailLauf:
     @property
     def fremdinhalt(self) -> bool:
         """Ob in diesem Lauf oder im geladenen Verlauf Mailinhalt von außen vorliegt."""
-        return bool(self.gelesene_absender) or self.verlauf_hat_mail
+        return bool(self.gelesene_absender) or self.listen_gelesen or self.verlauf_hat_mail
 
     def hat_selbst_genannt(self, adresse: str) -> bool:
         """Ob die Person diese Adresse selbst geschrieben hat."""

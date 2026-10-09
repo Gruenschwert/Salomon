@@ -8,6 +8,8 @@ den Hauptschlüssel kennt, kann technisch entschlüsseln.
 
 import base64
 import binascii
+import hashlib
+import hmac
 import os
 
 from cryptography.exceptions import InvalidTag
@@ -112,6 +114,20 @@ class Tresor:
                 "veränderte Daten)."
             ) from None
         return klartext.decode("utf-8")
+
+    def siegel(self, user_id: int, zweck: str, daten: bytes) -> bytes:
+        """Prüfsumme, die nur mit dem Schlüssel dieser Person entsteht. Damit lässt sich
+        erkennen, ob ein Wert (z. B. die Kennung einer Mail) für diese Person erzeugt wurde."""
+        version = self.aktuelle_version
+        if version not in self._schluessel:
+            raise TresorFehler(f"Der Hauptschlüssel der Version {version} ist nicht hinterlegt.")
+        schluessel = HKDF(
+            algorithm=hashes.SHA256(),
+            length=SCHLUESSEL_BYTES,
+            salt=None,
+            info=f"gs-assistant:siegel:{user_id}:{zweck}:v{version}".encode(),
+        ).derive(self._schluessel[version])
+        return hmac.new(schluessel, daten, hashlib.sha256).digest()
 
     def versiegle(self, user_id: int, zweck: str, klartext: str) -> bytes:
         """Verschlüsselt einen Text der Person zu einem einzigen Wert (Version, Nonce,

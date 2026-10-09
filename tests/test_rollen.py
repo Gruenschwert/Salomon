@@ -148,7 +148,10 @@ def test_kein_tool_kann_nutzer_verwalten_oder_fremde_inhalte_lesen(kontext):
     """Admin-Aktionen gibt es nur als Slash-Befehle, nie als Tool für das Modell."""
     namen = {tool.name for tool in lade_registry(kontext).alle()}
     for verboten in ("nutzer", "rolle", "sperren", "limit", "kosten", "verlauf", "nachrichten"):
-        assert not {n for n in namen if verboten in n and not n.startswith("asana_")}, verboten
+        # mail_verlauf_lesen (MAIL.md) meint ein Mail-Gespräch im eigenen Postfach, nicht den
+        # Gesprächsverlauf einer Person; die Trennung der Postfächer prüft test_mail_lesen.py.
+        erlaubt = ("asana_", "mail_")
+        assert not {n for n in namen if verboten in n and not n.startswith(erlaubt)}, verboten
     assert "asana_nutzer_suchen" in namen  # Asana-Nutzer, nicht unsere
 
 

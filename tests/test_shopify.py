@@ -91,7 +91,7 @@ def shopify_kontext(kontext):
 
 def test_echte_registry_findet_alle_tools(kontext):
     namen = [tool.name for tool in lade_registry(kontext).alle()]
-    assert [name for name in namen if not name.startswith("asana_")] == [
+    assert [name for name in namen if not name.startswith(("asana_", "mail_"))] == [
         "demo_notiz",
         "shopify_lagerbestand",
         "shopify_offene_bestellungen",

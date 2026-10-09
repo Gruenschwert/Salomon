@@ -48,6 +48,15 @@ class Ansicht:
     daten: bytes = field(repr=False)
 
 
+@dataclass(frozen=True)
+class Umgebung:
+    """Was je Anfrage über die anfragende Person bekannt ist und die Tool-Liste beeinflusst.
+    Kommt immer vom Server, nie vom Modell."""
+
+    # Labels der eigenen Postfächer; daraus entsteht der `enum` des Parameters `konto`
+    mail_konten: tuple[str, ...] = ()
+
+
 class ToolFehler(Exception):
     """Erwartbarer Fehler; die Meldung geht an Claude und darf keine internen Details enthalten."""
 
@@ -111,6 +120,12 @@ class BasisTool:
     # Rechte, die eine Person für dieses Tool braucht. Ohne sie existiert das Tool für das
     # Modell nicht, und der Ausführer lehnt es ab.
     erforderliche_rechte: ClassVar[frozenset[str]] = frozenset()
+    # True: Das Ergebnis enthält Mailinhalt von außen. Es geht nur umrandet als nicht
+    # vertrauenswürdig an das Modell und nur verschlüsselt und befristet in den Verlauf.
+    mailinhalt: ClassVar[bool] = False
+    # True: Parameter und Vorschau der Freigabe enthalten Mailinhalt und werden deshalb
+    # verschlüsselt abgelegt und nach der Entscheidung entfernt.
+    vertraulich: ClassVar[bool] = False
 
     def __init__(self, kontext: ToolKontext) -> None:
         self.kontext = kontext
@@ -120,6 +135,20 @@ class BasisTool:
 
     def vorschau(self, **params) -> str:
         raise NotImplementedError
+
+    def verfuegbar_fuer(self, umgebung: Umgebung) -> bool:
+        """Ob das Tool dieser Person in dieser Anfrage angeboten wird (über die Rechte hinaus)."""
+        return True
+
+    def schema_fuer(self, umgebung: Umgebung) -> dict:
+        """Das Schema für diese Anfrage. Nur wenige Tools hängen von der Person ab (die
+        Mail-Tools bauen den `enum` von `konto` aus deren eigenen Postfächern)."""
+        return self.parameter_schema
+
+    def audit(self, params: dict, daten: dict | None) -> tuple[dict, str] | None:
+        """Eigene Metadaten für das Audit-Log statt Parametern und Ergebnistext; None =
+        Standard. Tools mit Mailinhalt liefern hier nur Aktion, Konto-Label und Anzahl."""
+        return None
 
     def ist_schreibend(self, params: dict) -> bool:
         """Ob dieser Aufruf eine Freigabe braucht. Nur wenige Tools hängen von den Parametern
