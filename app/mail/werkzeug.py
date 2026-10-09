@@ -3,13 +3,16 @@
 import copy
 import logging
 import re
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import ClassVar
 
 from app.auth.rechte import MAIL_EIGENE
 from app.auth.tresor import Tresor
+from app.db.models import jetzt
 from app.mail import kennung as kennungen
 from app.mail.kennung import Kennung
-from app.mail.konten import Postfach, loese_konto, tresor_fuer
+from app.mail.konten import Postfach, loese_konto, speichere_postfach, tresor_fuer
 from app.mail.lauf import aktueller_mail_lauf
 from app.tools.base import BasisTool, ToolFehler, Umgebung, aktueller_nutzer
 
@@ -20,6 +23,13 @@ KONTO_BESCHREIBUNG = (
 )
 KONTO_SCHEMA = {"type": "string", "description": KONTO_BESCHREIBUNG}
 INTERNER_FEHLER_TEXT = "Beim Zugriff auf das Postfach ist ein interner Fehler aufgetreten."
+NUR_LESEN_TEXT = (
+    "Das Postfach „{label}“ ist nur zum Lesen verbunden, weil der Versand beim Verbinden nicht "
+    "möglich war. Senden, Antworten und Weiterleiten gehen damit nicht; einen Entwurf kann ich "
+    "ablegen. Den Versand prüft die Person erneut mit /testen mail {label}."
+)
+# So oft bietet der Bot bei einem Nur-Lesen-Postfach an, den Versand erneut zu testen.
+ANGEBOT_ABSTAND = timedelta(days=7)
 _LABEL = re.compile(r"^[a-z0-9][a-z0-9._-]{0,29}$")
 
 
@@ -64,6 +74,7 @@ class MailTool(BasisTool):
 
     async def ausfuehren(self, **params) -> dict:
         postfach = await self.postfach(params.pop("konto", None))
+        await self._biete_versandtest_an(postfach)
         try:
             ergebnis = await self.arbeite(postfach, **params)
         except ToolFehler:
@@ -76,6 +87,26 @@ class MailTool(BasisTool):
 
     async def arbeite(self, postfach: Postfach, **params) -> dict:
         raise NotImplementedError
+
+    async def _biete_versandtest_an(self, postfach: Postfach) -> None:
+        """Bei einem Postfach ohne Versand merkt der Lauf höchstens einmal pro Woche vor,
+        dass die Antwort den erneuten Test anbietet."""
+        lauf = aktueller_mail_lauf.get()
+        if postfach.senden or lauf is None or postfach.label in lauf.versand_angebote:
+            return
+        try:
+            zuletzt = datetime.fromisoformat(postfach.versand_hinweis_am)
+        except ValueError:
+            zuletzt = None
+        if zuletzt is not None and jetzt() - zuletzt < ANGEBOT_ABSTAND:
+            return
+        lauf.versand_angebote.append(postfach.label)
+        await speichere_postfach(
+            self.kontext.session_fabrik,
+            self.tresor(),
+            aktueller_nutzer.get(),
+            replace(postfach, versand_hinweis_am=jetzt().isoformat()),
+        )
 
     def anzahl(self, daten: dict) -> int:
         return 1

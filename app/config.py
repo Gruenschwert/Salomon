@@ -78,7 +78,10 @@ class Settings(BaseSettings):
     mail_imap_host: str = "imaps.udag.de"
     mail_imap_port: int = 993
     mail_smtp_host: str = "smtps.udag.de"
-    mail_smtp_port: int = 465
+    # 587 mit STARTTLS, weil Hetzner Cloud ausgehend die Ports 25 und 465 sperrt
+    mail_smtp_port: int = 587
+    # "starttls" (z. B. Port 587) oder "ssl" (TLS von Beginn an, z. B. Port 465)
+    mail_smtp_sicherheit: str = "starttls"
     # Obergrenze für den Text einer Mail, der an das Modell geht
     mail_max_zeichen: int = 12000
     mail_anhang_max_mb: float = 5
@@ -114,6 +117,14 @@ class Settings(BaseSettings):
                 if not (wert == "" and name.lower() in mit_standard)
             }
         return werte
+
+    @field_validator("mail_smtp_sicherheit")
+    @classmethod
+    def _smtp_sicherheit(cls, wert: str) -> str:
+        wert = wert.strip().lower()
+        if wert not in ("ssl", "starttls"):
+            raise ValueError("MAIL_SMTP_SICHERHEIT muss ssl oder starttls sein")
+        return wert
 
     @model_validator(mode="after")
     def _standardmodell(self) -> "Settings":

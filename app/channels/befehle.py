@@ -23,6 +23,7 @@ from app.auth.zugaenge import DIENSTE, MAIL, Zugaenge
 from app.db.models import ROLLEN
 from app.db.session import SessionFabrik
 from app.mail.konten import ist_adresse, lies_server, pruefe_label
+from app.mail.verbindung import variante_text
 from app.observability.audit import protokolliere
 from app.observability.costs import ERLAUBTE_ZEITRAEUME, Kosten, als_euro
 from app.tools.base import ToolFehler
@@ -80,6 +81,8 @@ class BefehlsAntwort:
     text: str
     # Kennung einer Aktion, die der Admin noch per Button bestätigen muss
     aktion: str | None = None
+    # Eigene Beschriftung der beiden Buttons (Ja, Nein); None = Bestätigen / Abbrechen
+    knoepfe: tuple[str, str] | None = None
 
 
 @dataclass
@@ -94,6 +97,9 @@ class _Aktion:
     gueltig_bis: float
     # Recht, das beim Klick noch einmal geprüft wird; None = eigene Daten, kein Recht nötig
     recht: str | None = ADMIN_NUTZER
+    # Eigene Antworten statt „✅ Erledigt: …“ und „Abgebrochen: …“
+    erledigt_text: str | None = None
+    abbruch_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,9 @@ class Befehle:
                 self._trennen,
             ),
             Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
+            Befehl(
+                "testen", "Versand eines Postfachs erneut prüfen: /testen mail <name>", self._testen
+            ),
             Befehl(
                 "signatur",
                 "Signatur eines Postfachs ansehen oder ändern: /signatur <name>",
@@ -389,6 +398,8 @@ class Befehle:
         parameter: dict,
         ausfuehren: Callable[[], Awaitable[None]],
         recht: str | None = ADMIN_NUTZER,
+        erledigt_text: str | None = None,
+        abbruch_text: str | None = None,
     ) -> BefehlsAntwort:
         kennung = secrets.token_hex(6)
         self._aktionen[kennung] = _Aktion(
@@ -399,6 +410,8 @@ class Befehle:
             ausfuehren=ausfuehren,
             gueltig_bis=time.monotonic() + AKTION_FRIST_SEKUNDEN,
             recht=recht,
+            erledigt_text=erledigt_text,
+            abbruch_text=abbruch_text,
         )
         return BefehlsAntwort(f"Bitte bestätigen: {beschreibung}", aktion=kennung)
 
@@ -417,7 +430,7 @@ class Befehle:
         if aktion.recht is not None and not nutzer.darf(aktion.recht):
             return "Dafür fehlt dir das Recht. Es wurde nichts geändert."
         if not ja:
-            return f"Abgebrochen: {aktion.beschreibung}"
+            return aktion.abbruch_text or f"Abgebrochen: {aktion.beschreibung}"
         try:
             await aktion.ausfuehren()
         except NutzerFehler as exc:
@@ -436,7 +449,7 @@ class Befehle:
             parameter=aktion.parameter,
             ergebnis_kurz="ausgeführt",
         )
-        return f"✅ Erledigt: {aktion.beschreibung}"
+        return aktion.erledigt_text or f"✅ Erledigt: {aktion.beschreibung}"
 
     async def _nutzer(self, nutzer: NutzerKontext, *_: object) -> str:
         zeilen = ["Personen:"]
@@ -654,7 +667,9 @@ class Befehle:
         await self._zugang().setze_signatur(nutzer, label, text)
         return f"Gespeichert. Diese Signatur hänge ich an Entwürfe aus „{label}“ an."
 
-    async def nimm_geheimnis(self, nutzer: NutzerKontext, chat_id: int, geheimnis: str) -> str:
+    async def nimm_geheimnis(
+        self, nutzer: NutzerKontext, chat_id: int, geheimnis: str
+    ) -> "str | BefehlsAntwort":
         """Verarbeitet die Nachricht mit Token oder Passwort. Sie wird weder gespeichert noch
         geloggt noch an das Modell gegeben; der Kanal hat sie bereits aus dem Chat gelöscht."""
         eintrag = self._erwartet.pop((chat_id, nutzer.telegram_id))
@@ -686,37 +701,99 @@ class Befehle:
 
     async def _nimm_passwort(
         self, nutzer: NutzerKontext, chat_id: int, passwort: str, eintrag: _Dialog
-    ) -> str:
+    ) -> "str | BefehlsAntwort":
         daten = eintrag.daten
         try:
-            postfach = await self._zugang().verbinde_mail(
+            test = await self._zugang().teste_mail(
                 nutzer, daten["adresse"], passwort, daten.get("imap"), daten.get("smtp")
             )
         except ToolFehler as exc:
-            await protokolliere(
-                self._session_fabrik,
-                user_id=nutzer.id,
-                tool_name="/verbinden",
-                parameter={"dienst": MAIL},
-                fehler="abgelehnt",
-            )
+            return f"Das hat nicht geklappt: {exc} Es wurde nichts gespeichert."
+        bericht = "\n".join(test.zeilen())
+        if test.ok:
+            postfach = await self._zugang().speichere_mail(nutzer, test.postfach)
+            await self._protokolliere_verbinden(nutzer, postfach.label, "verbunden")
+            self._warte_auf(chat_id, nutzer, ART_MAIL_NAME, label=postfach.label)
             return (
-                f"Das hat nicht geklappt: {exc} Es wurde nichts gespeichert. Mit /verbinden "
-                "mail kannst du es noch einmal versuchen."
+                f"✅ Das Postfach {postfach.adresse} ist verbunden.\n{bericht}\n"
+                f"Bei mir heißt es „{postfach.label}“. Möchtest du einen anderen Namen? Dann "
+                "antworte mit „name <neuer name>“. Sonst schreib einfach weiter."
             )
+        if not test.nur_lesen_moeglich:
+            await self._protokolliere_verbinden(nutzer, None, "", fehler="abgelehnt")
+            return (
+                f"Das hat nicht geklappt:\n{bericht}\nEs wurde nichts gespeichert. Mit "
+                "/verbinden mail kannst du es noch einmal versuchen."
+            )
+        # Lesen ginge, Senden nicht: Die Person entscheidet per Button. Bis dahin liegt das
+        # geprüfte Postfach nur im Arbeitsspeicher, höchstens bis die Frist abläuft.
+        postfach = test.postfach
+        label = postfach.label
+
+        async def nur_lesen() -> None:
+            await self._zugang().speichere_mail(nutzer, postfach, senden=False)
+            self._warte_auf(chat_id, nutzer, ART_MAIL_NAME, label=label)
+
+        antwort = self._merke_aktion(
+            nutzer,
+            "verbinden",
+            f"Postfach {label} nur zum Lesen speichern",
+            {"dienst": MAIL, "konto": label, "senden": False},
+            nur_lesen,
+            recht=None,
+            erledigt_text=(
+                f"✅ Das Postfach {postfach.adresse} ist nur zum Lesen verbunden: Suchen, Lesen "
+                "und Entwürfe gehen, Senden nicht. Bei mir heißt es "
+                f"„{label}“ (anderer Name: „name <neuer name>“). Mit /testen mail {label} "
+                "prüfe ich den Versand erneut."
+            ),
+            abbruch_text="Abgebrochen. Es wurde nichts gespeichert.",
+        )
+        return BefehlsAntwort(
+            f"Der Eingang funktioniert, der Ausgang nicht:\n{bericht}\n"
+            "Ich kann das Postfach nur zum Lesen speichern: Suchen, Lesen und Entwürfe gehen, "
+            "Senden nicht. Gespeichert ist bisher nichts.",
+            aktion=antwort.aktion,
+            knoepfe=("📥 Nur zum Lesen speichern", "❌ Abbrechen"),
+        )
+
+    async def _protokolliere_verbinden(
+        self, nutzer: NutzerKontext, label: str | None, kurz: str, fehler: str | None = None
+    ) -> None:
         await protokolliere(
             self._session_fabrik,
             user_id=nutzer.id,
             tool_name="/verbinden",
-            parameter={"dienst": MAIL, "konto": postfach.label},
-            ergebnis_kurz="verbunden",
+            parameter={"dienst": MAIL, **({"konto": label} if label else {})},
+            ergebnis_kurz=kurz,
+            fehler=fehler,
         )
-        self._warte_auf(chat_id, nutzer, ART_MAIL_NAME, label=postfach.label)
-        return (
-            f"✅ Das Postfach {postfach.adresse} ist verbunden. Bei mir heißt es "
-            f"„{postfach.label}“. Möchtest du einen anderen Namen? Dann antworte mit "
-            "„name <neuer name>“. Sonst schreib einfach weiter."
+
+    async def _testen(
+        self, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
+    ) -> str:
+        """Prüft den Versand eines eigenen Postfachs erneut (nur Anmeldung, nichts wird
+        gesendet) und schaltet ihn bei Erfolg frei."""
+        if not argumente or argumente[0].lower() != MAIL:
+            return "So geht es: /testen mail <name>"
+        if not nutzer.darf(MAIL_EIGENE):
+            return MAIL_KEIN_RECHT_TEXT
+        label = await self._eigenes_label(nutzer, argumente[1:], "/testen mail")
+        test = await self._zugang().teste_versand_erneut(nutzer, label)
+        await protokolliere(
+            self._session_fabrik,
+            user_id=nutzer.id,
+            tool_name="/testen",
+            parameter={"dienst": MAIL, "konto": label},
+            ergebnis_kurz="Versand möglich" if test.smtp is None else "Versand nicht möglich",
         )
+        bericht = "\n".join(test.ausgang_zeilen())
+        if test.smtp is None:
+            return (
+                f"✅ Der Versand aus „{label}“ funktioniert ({variante_text(test.postfach)}). "
+                f"Das Postfach kann jetzt senden.\n{bericht}"
+            )
+        return f"Der Versand aus „{label}“ geht weiterhin nicht; es bleibt beim Lesen.\n{bericht}"
 
     async def _trennen(
         self, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
@@ -795,7 +872,10 @@ class Befehle:
         teile = [dienst for dienst in dienste if dienst != MAIL]
         if MAIL in dienste:
             postfaecher = await self._zugang().postfaecher(nutzer)
-            teile += [f"Postfach {p.label} ({p.adresse})" for p in postfaecher]
+            teile += [
+                f"Postfach {p.label} ({p.adresse}{'' if p.senden else ', nur lesen'})"
+                for p in postfaecher
+            ]
         return "Verbunden: " + ", ".join(teile) + ". Die Zugangsdaten selbst zeige ich nie an."
 
 

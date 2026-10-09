@@ -62,6 +62,10 @@ LEERE_ANTWORT_TEXT = "Dazu habe ich keine Antwort erhalten. Bitte formuliere die
 GEKUERZT_HINWEIS = (
     "\n\n(Hier endet meine Antwort am Ausgabelimit. Schreib „weiter“, dann setze ich fort.)"
 )
+VERSANDTEST_ANGEBOT = (
+    "\n\nHinweis: Das Postfach „{label}“ ist nur zum Lesen verbunden. Mit /testen mail {label} "
+    "prüfe ich, ob der Versand inzwischen möglich ist."
+)
 FOTO_MARKE = "[Foto]"
 FOTO_OHNE_TEXT = "Bitte lies dieses Foto."
 DATEI_OHNE_TEXT = "(Der Nutzer hat nichts dazu geschrieben.)"
@@ -149,6 +153,9 @@ class Agent:
             # Die IMAP-Verbindungen dieser Anfrage sauber schließen.
             await schliesse_lauf()
             aktueller_mail_lauf.reset(marke)
+        for label in lauf.versand_angebote:
+            # Höchstens einmal pro Woche je Postfach, siehe MailTool._biete_versandtest_an.
+            text += VERSANDTEST_ANGEBOT.format(label=label)
         # Hat die Runde Mailinhalt gelesen oder eine Mail vorbereitet, kommen Tool-Ergebnisse
         # und Antwort nur verschlüsselt und befristet in den Verlauf.
         ablage = None

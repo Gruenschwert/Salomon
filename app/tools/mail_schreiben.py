@@ -17,7 +17,7 @@ from app.mail.limits import AKTION_GESENDET, pruefe_tageslimit
 from app.mail.nachricht import Ausgang, Empfaenger
 from app.mail.schutz import NEUER_EMPFAENGER, herkunft_zeilen
 from app.mail.verbindung import imap_aufruf, smtp_sende
-from app.mail.werkzeug import KONTO_SCHEMA, MailSchreibTool
+from app.mail.werkzeug import KONTO_SCHEMA, NUR_LESEN_TEXT, MailSchreibTool
 from app.medien import groesse_text
 from app.tools.base import ToolFehler, aktueller_nutzer
 from app.tools.mail_lesen import KENNUNG_SCHEMA
@@ -125,6 +125,8 @@ class _Sendend(_MitVorlage):
         raise NotImplementedError
 
     async def _pruefe(self, postfach: Postfach, **params):
+        if not postfach.senden:
+            raise ToolFehler(NUR_LESEN_TEXT.format(label=postfach.label))
         await pruefe_tageslimit(self.kontext, aktueller_nutzer.get())
         ausgang, bekannte, zusatz = await self.baue_ausgang(postfach, **params)
         bau.pruefe_empfaenger(ausgang.empfaenger, self.kontext.settings.mail_max_empfaenger)

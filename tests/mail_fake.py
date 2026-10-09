@@ -9,7 +9,9 @@ import base64
 import email
 import email.policy
 import re
+import socket
 import socketserver
+import ssl
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -87,6 +89,17 @@ class FakeMailServer:
         self.abgelehnte_empfaenger: set[str] = set()
         # True: Der Server legt gesendete Mails selbst im Ordner „Gesendet“ ab.
         self.legt_gesendete_selbst_ab = False
+        # True: Der SMTP-Server lehnt jede Anmeldung ab, auch mit richtigem Passwort.
+        self.smtp_lehnt_ab = False
+        # SMTP-Ports, die wie bei einer Sperre des Hosters nie antworten (Zeitüberschreitung)
+        self.gesperrte_smtp_ports: set[int] = set()
+        # SMTP-Ports, auf denen das Zertifikat nicht zum Hostnamen passt
+        self.smtp_ports_mit_falschem_zertifikat: set[int] = set()
+        # Nimmt Verbindungen an und antwortet nie
+        self._schweiger = socket.socket()
+        self._schweiger.bind(("127.0.0.1", 0))
+        self._schweiger.listen(50)
+        self.schweiger_port = self._schweiger.getsockname()[1]
         self._imap = _starte(_ImapHandler, self)
         self._smtp = _starte(_SmtpHandler, self)
         self.imap_port = self._imap.server_address[1]
@@ -100,6 +113,7 @@ class FakeMailServer:
         for server in (self._imap, self._smtp):
             server.shutdown()
             server.server_close()
+        self._schweiger.close()
 
 
 class _Server(socketserver.ThreadingTCPServer):
@@ -122,21 +136,37 @@ class TestNetz:
     def __init__(self, server: FakeMailServer) -> None:
         self.server = server
         self.imap_ziele: list[tuple[str, int]] = []
-        self.smtp_ziele: list[tuple[str, int]] = []
+        # (Host, Port, Verschlüsselung), so wie der Bot sie im Betrieb ansprechen würde
+        self.smtp_ziele: list[tuple[str, int, str]] = []
 
     def imap(self, host: str, port: int):
         self.imap_ziele.append((host, port))
         return MailBoxUnencrypted("127.0.0.1", self.server.imap_port, timeout=5)
 
-    def smtp(self, host: str, port: int):
-        self.smtp_ziele.append((host, port))
+    def smtp(self, host: str, port: int, sicherheit: str):
+        self.smtp_ziele.append((host, port, sicherheit))
+        if port in self.server.smtp_ports_mit_falschem_zertifikat:
+            return _FalschesZertifikat()
+        gesperrt = port in self.server.gesperrte_smtp_ports
         return aiosmtplib.SMTP(
             hostname="127.0.0.1",
-            port=self.server.smtp_port,
+            port=self.server.schweiger_port if gesperrt else self.server.smtp_port,
             use_tls=False,
             start_tls=False,
-            timeout=5,
+            timeout=0.3 if gesperrt else 5,
         )
+
+
+class _FalschesZertifikat:
+    """Verhält sich wie ein Server, dessen Zertifikat nicht zum Hostnamen passt."""
+
+    async def connect(self):
+        raise ssl.SSLCertVerificationError(
+            1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Hostname mismatch"
+        )
+
+    def close(self) -> None:
+        return None
 
 
 def baue_mail(
@@ -506,7 +536,7 @@ class _SmtpHandler(socketserver.StreamRequestHandler):
         zustand: FakeMailServer = self.server.zustand
         zustand.smtp_anmeldungen += 1
         postfach = zustand.postfaecher.get(adresse)
-        if postfach is None or postfach.passwort != passwort:
+        if postfach is None or postfach.passwort != passwort or zustand.smtp_lehnt_ab:
             self.sende("535 5.7.8 Authentication failed")
             return
         self.adresse = adresse

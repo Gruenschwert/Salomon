@@ -33,6 +33,8 @@ class MailLauf:
     kontext_texte: list[str] = field(default_factory=list)
     # True, sobald in diesem Lauf Mailinhalt gelesen oder eine Mail vorbereitet wurde
     vertraulich: bool = False
+    # Postfächer ohne Versand, für die in dieser Antwort der erneute Test angeboten wird
+    versand_angebote: list[str] = field(default_factory=list)
     # Label -> offene IMAP-Verbindung dieses Laufs
     verbindungen: dict[str, object] = field(default_factory=dict)
 

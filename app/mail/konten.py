@@ -23,6 +23,11 @@ from app.db.session import SessionFabrik
 from app.tools.base import ToolFehler, ToolKontext
 
 DIENST = "mail"
+SSL = "ssl"
+STARTTLS = "starttls"
+# Üblicher Port je Art der Verschlüsselung
+STANDARD_PORT = {SSL: 465, STARTTLS: 587}
+SICHERHEIT_TEXT = {SSL: "SSL/TLS", STARTTLS: "STARTTLS"}
 MAX_LABEL_ZEICHEN = 30
 MAX_SIGNATUR_ZEICHEN = 1000
 _LABEL = re.compile(rf"^[a-z0-9][a-z0-9._-]{{0,{MAX_LABEL_ZEICHEN - 1}}}$")
@@ -47,6 +52,12 @@ class Postfach:
     smtp_host: str
     smtp_port: int
     signatur: str = ""
+    # Ältere Einträge kennen das Feld nicht; sie wurden mit TLS von Beginn an verbunden.
+    smtp_sicherheit: str = SSL
+    # False: nur zum Lesen verbunden, weil der Versand beim Verbinden nicht möglich war
+    senden: bool = True
+    # Wann zuletzt angeboten wurde, den Versand erneut zu testen (ISO-Zeitpunkt)
+    versand_hinweis_am: str = ""
 
 
 def ist_adresse(text: str) -> bool:
@@ -79,6 +90,17 @@ def lies_server(angabe: str, standard_port: int) -> tuple[str, int]:
     if not 1 <= nummer <= 65535:
         raise ToolFehler("Der Port muss zwischen 1 und 65535 liegen.")
     return host.lower(), nummer
+
+
+def sicherheit_fuer(port: int, standard: str) -> str:
+    """Welche Verschlüsselung zu einem ausdrücklich genannten Port gehört."""
+    return next((art for art, nummer in STANDARD_PORT.items() if nummer == port), standard)
+
+
+def andere_variante(port: int, sicherheit: str) -> tuple[int, str]:
+    """Die jeweils andere übliche Kombination: 587 mit STARTTLS bzw. 465 mit SSL/TLS."""
+    andere = SSL if sicherheit == STARTTLS else STARTTLS
+    return STANDARD_PORT[andere], andere
 
 
 def tresor_fuer(settings: Settings) -> Tresor:

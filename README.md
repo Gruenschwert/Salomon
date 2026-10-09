@@ -132,9 +132,10 @@ Befehle laufen direkt im Bot und nie über das Modell. `/hilfe` zeigt nur, was d
 |---|---|
 | `/start`, `/hilfe` | Begrüßung, Liste der Befehle |
 | `/verbinden asana` | Eigenen Asana-Token hinterlegen. Der Bot fragt danach, prüft ihn bei Asana und löscht die Nachricht mit dem Token aus dem Chat |
-| `/verbinden mail` | Eigenes Postfach verbinden. Der Bot fragt nach Adresse und Passwort, prüft die Anmeldung an IMAP und SMTP (ohne etwas zu senden) und löscht die Nachricht mit dem Passwort aus dem Chat |
+| `/verbinden mail` | Eigenes Postfach verbinden. Der Bot fragt nach Adresse und Passwort, prüft die Anmeldung an IMAP und SMTP (ohne etwas zu senden) und löscht die Nachricht mit dem Passwort aus dem Chat. Geht nur der Eingang, lässt sich das Postfach per Button nur zum Lesen speichern |
 | `/trennen asana`, `/trennen mail <name>`, `/verbunden` | Zugang entfernen; verbundene Dienste anzeigen (bei Postfächern Name und Adresse, nie Passwörter) |
 | `/signatur <name>` | Signatur eines Postfachs ansehen, ändern oder löschen |
+| `/testen mail <name>` | Versand eines Postfachs erneut prüfen (nur Anmeldung, es wird nichts gesendet) und bei Erfolg freischalten |
 | `/kosten [1\|3\|7\|30]` | Eigene Kosten im Zeitraum, nach Modell und Grund der Modellwahl |
 | `/modell einfach\|standard\|komplex\|auto` | Modellstufe festlegen, gilt bis zum nächsten Neustart des Bots |
 | `/profil` | Name, Anrede (du/Sie) und Zeitzone anzeigen oder ändern |
@@ -242,12 +243,38 @@ Jede Person arbeitet über den Bot in ihren **eigenen** Postfächern (IMAP zum L
 
 Auf dem Server ist nichts zu tun, wenn die Postfächer bei united-domains liegen und `SECRETS_MASTER_KEY` gesetzt ist. Jede Person schreibt dem Bot im privaten Chat `/verbinden mail`, schickt ihre E-Mail-Adresse und danach das Passwort. Der Bot löscht die Nachricht mit dem Passwort sofort aus dem Chat, meldet sich testweise an beiden Servern an (es wird nichts gesendet) und speichert erst bei Erfolg, verschlüsselt. Das Postfach bekommt als Namen den Teil vor dem @; mit der Antwort „name shop“ heißt es anders. Eine Person kann mehrere Postfächer verbinden.
 
-Liegt ein Postfach woanders: `/verbinden mail <imap-server[:port]> <smtp-server[:port]>`. Der Bot verbindet sich immer mit TLS von Beginn an (IMAP 993, SMTP 465) und prüft das Zertifikat; STARTTLS und unverschlüsselte Verbindungen gibt es nicht.
+Liegt ein Postfach woanders: `/verbinden mail <imap-server[:port]> <smtp-server[:port]>`. Ein genannter SMTP-Port 465 bedeutet TLS von Beginn an, 587 STARTTLS; ohne Port gelten `MAIL_SMTP_PORT` und `MAIL_SMTP_SICHERHEIT`.
+
+Der Bot verbindet sich nur verschlüsselt und prüft immer Zertifikat und Hostnamen; abschalten lässt sich das nicht. IMAP läuft mit TLS von Beginn an (Port 993). SMTP läuft je Postfach mit STARTTLS (Port 587, Standard) oder mit TLS von Beginn an (Port 465). Bietet ein Server bei STARTTLS keine Verschlüsselung an, bricht der Bot ab, bevor er sich anmeldet.
+
+Der Login-Test meldet Eingang und Ausgang getrennt, zum Beispiel:
+
+```
+Eingang (IMAP): ok
+Ausgang (SMTP): ok (Port 587 mit STARTTLS)
+```
+
+Ist der Ausgang über die eingestellte Variante nicht erreichbar (Verbindungsfehler oder Zeitüberschreitung), probiert der Bot von selbst die andere: 587 mit STARTTLS, dann 465 mit TLS von Beginn an, oder umgekehrt. Gespeichert wird die Variante, die funktioniert hat. Bei abgelehnter Anmeldung oder ungültigem Zertifikat probiert er nichts weiter.
+
+Geht der Eingang, der Ausgang aber nicht, bietet der Bot zwei Buttons an: „Nur zum Lesen speichern“ oder „Abbrechen“. Ein nur zum Lesen verbundenes Postfach kann suchen, lesen und Entwürfe ablegen; `mail_senden`, `mail_antworten` und `mail_weiterleiten` lehnen mit einer klaren Meldung ab. `/verbunden` zeigt dann „nur lesen“. `/testen mail <name>` prüft den Versand erneut und schaltet ihn bei Erfolg frei; höchstens einmal pro Woche erinnert der Bot beim Verwenden des Postfachs daran.
+
+### Hetzner sperrt Port 25 und 465, deshalb Port 587 mit STARTTLS
+
+Hetzner Cloud sperrt ausgehende Verbindungen auf den Ports 25 und 465 (laut Hetzner-FAQ); Port 587 ist offen. Auf einem solchen Server lief der Login-Test mit `smtps.udag.de:465` deshalb ins Zeitlimit und meldete „Ausgang (SMTP): Server nicht erreichbar“, obwohl Adresse und Passwort stimmten.
+
+Der Standard ist deshalb `smtps.udag.de`, Port 587, STARTTLS. Geprüft am 09.10.2026 von einem Rechner außerhalb von Hetzner, ohne Anmeldung: `smtps.udag.de:587` nimmt STARTTLS an, und das Zertifikat gilt für den Hostnamen (es nennt `smtp.udag.de` und `smtps.udag.de`). Ein Wechsel auf `smtp.udag.de` war deshalb nicht nötig. Ob der Hetzner-Server Port 587 wirklich erreicht, zeigt erst `/verbinden mail` dort.
+
+Was zu tun ist:
+
+- Nach dem Update nichts, wenn `MAIL_SMTP_PORT` nicht in `.env` steht. Steht dort noch `MAIL_SMTP_PORT=465`, die Zeile löschen oder auf 587 ändern und `MAIL_SMTP_SICHERHEIT=starttls` setzen. Auch mit dem alten Wert weicht der Login-Test von selbst auf 587 aus; es dauert dann nur länger.
+- Sind beide Ports nicht erreichbar, sagt die Meldung das mit dem Hinweis auf die Sperre des Servers. Dann bleibt das Postfach nur zum Lesen, bis der Ausgang erreichbar ist; ob und wie Hetzner die Sperre aufhebt, steht in deren FAQ.
+- Postfächer, die schon mit Port 465 gespeichert sind, behalten ihn. `/testen mail <name>` stellt sie auf die Variante um, die funktioniert.
 
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `MAIL_IMAP_HOST`, `MAIL_IMAP_PORT` | `imaps.udag.de`, 993 | Eingangsserver, wenn beim Verbinden kein eigener genannt wird |
-| `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT` | `smtps.udag.de`, 465 | Ausgangsserver |
+| `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT` | `smtps.udag.de`, 587 | Ausgangsserver |
+| `MAIL_SMTP_SICHERHEIT` | `starttls` | `starttls` (z. B. Port 587) oder `ssl` (TLS von Beginn an, z. B. Port 465). Andere Werte lehnt der Bot beim Start ab |
 | `MAIL_MAX_ZEICHEN` | 12000 | Längere Mailtexte gehen gekürzt an die KI, mit Hinweis |
 | `MAIL_ANHANG_MAX_MB` | 5 | Größere Anhänge lädt der Bot nicht zum Ansehen |
 | `MAIL_MAX_SENDEN_PRO_TAG` | 20 | Versendete Mails je Person und Tag (Antworten und Weiterleitungen zählen mit, Entwürfe nicht) |
@@ -486,10 +513,11 @@ Festlegungen zu MAIL.md, wo das Dokument offen war:
 - Der Filter „mit Anhang“ liest die Struktur (`BODYSTRUCTURE`) der neuesten 200 Treffer; IMAP kennt dafür kein Suchkriterium.
 - Zusätzlich zur Vorgabe: Mailinhalt liest nicht das einfache Modell.
 - Funktionspostfächer (Abschnitt 9) sind nicht gebaut.
+- Nachtrag zum SMTP-Ausgang: Entgegen der ersten Fassung gibt es STARTTLS (Port 587), weil Hetzner Port 465 sperrt. Bietet der Bot „Nur zum Lesen speichern“ an, liegt das geprüfte Postfach bis zum Klick (höchstens fünf Minuten) nur im Arbeitsspeicher; gespeichert wird erst nach dem Klick. Das Angebot gibt es auch bei ungültigem Zertifikat, nicht nur bei „nicht erreichbar“ und „abgelehnt“.
 
 ## Bekannte Grenzen
 
-- Mail ist nur gegen einen Test-Server im Arbeitsspeicher geprüft, nicht gegen united-domains. Ordnernamen, Special-Use-Merkmale, `MOVE` und das Verhalten beim Ablegen gesendeter Mails zeigen sich erst im Live-Test (siehe Abnahme unter [Mail](#mail)).
+- Mail ist nur gegen einen Test-Server im Arbeitsspeicher geprüft, nicht gegen united-domains (Ausnahme: der Verbindungsaufbau zu `smtps.udag.de:587` samt Zertifikat, ohne Anmeldung). Der Test-Server verschlüsselt nicht; dass im Betrieb STARTTLS bzw. TLS mit Zertifikatsprüfung eingestellt ist, prüft ein Test an den Einstellungen der Verbindung. Ordnernamen, Special-Use-Merkmale, `MOVE` und das Verhalten beim Ablegen gesendeter Mails zeigen sich erst im Live-Test (siehe Abnahme unter [Mail](#mail)).
 - Eine Kennung gilt für das Postfach, für das sie erzeugt wurde, und bis der Schlüssel (`SECRETS_MASTER_KEY`) wechselt. Nach einem Schlüsselwechsel sucht der Bot die Mail neu; verschlüsselter Mailinhalt im Verlauf ist dann nicht mehr lesbar und erscheint als Platzhalter.
 - Der Admin sieht von den Mail-Aktionen anderer nichts, auch keine Anzahlen: Das Audit-Log ist nur für die jeweilige Person lesbar, und einen Befehl für eine Auswertung je Person gibt es nicht.
 - Anhänge kann der Bot ansehen und beim Weiterleiten mitschicken, aber keiner neuen Mail hinzufügen.

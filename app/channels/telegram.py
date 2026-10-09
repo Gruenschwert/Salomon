@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import TelegramError
@@ -31,7 +31,7 @@ from app.channels.base import (
     FreigabeAnfrage,
     NachrichtenHandler,
 )
-from app.channels.befehle import Befehle
+from app.channels.befehle import Befehle, BefehlsAntwort
 from app.channels.rundnachricht import an_rolle_senden
 from app.config import Settings
 from app.db.models import TelegramDatei
@@ -332,22 +332,23 @@ class TelegramKanal:
             await self.sende_antwort(chat.id, FEHLER_TEXT)
             await self._melde_fehler(f"Befehl /{name}", exc)
             return
+        await self._sende_befehlsantwort(chat.id, antwort)
+
+    async def _sende_befehlsantwort(self, chat_id: int, antwort) -> None:
+        """Antwort eines Befehls; mit `aktion` hängen zwei Buttons zum Bestätigen daran."""
         if antwort.aktion is None:
-            await self.sende_antwort(chat.id, antwort.text)
+            await self.sende_antwort(chat_id, antwort.text)
             return
         kennung = f"{ADMIN_PRAEFIX}:{antwort.aktion}"
+        ja, nein = antwort.knoepfe or ("✅ Bestätigen", "❌ Abbrechen")
         await self.application.bot.send_message(
-            chat_id=chat.id,
+            chat_id=chat_id,
             text=antwort.text,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
-                        InlineKeyboardButton(
-                            "✅ Bestätigen", callback_data=f"{kennung}:{KLICK_JA}"
-                        ),
-                        InlineKeyboardButton(
-                            "❌ Abbrechen", callback_data=f"{kennung}:{KLICK_NEIN}"
-                        ),
+                        InlineKeyboardButton(ja, callback_data=f"{kennung}:{KLICK_JA}"),
+                        InlineKeyboardButton(nein, callback_data=f"{kennung}:{KLICK_NEIN}"),
                     ]
                 ]
             ),
@@ -401,11 +402,13 @@ class TelegramKanal:
             geloescht = False
             log.warning("Nachricht mit Zugangsdaten nicht löschbar: %s", type(exc).__name__)
         try:
-            text = await self.befehle.nimm_geheimnis(nutzer, chat_id, geheimnis)
+            ergebnis = await self.befehle.nimm_geheimnis(nutzer, chat_id, geheimnis)
         except Exception as exc:
             # Nur der Typ: Die Meldung könnte das Geheimnis enthalten.
             log.error("Fehler beim Verbinden eines Zugangs: %s", type(exc).__name__)
-            text = FEHLER_TEXT
+            ergebnis = FEHLER_TEXT
+        antwort = ergebnis if isinstance(ergebnis, BefehlsAntwort) else BefehlsAntwort(ergebnis)
+        text = antwort.text
         if not geloescht:
             text += (
                 f"\nIch konnte deine Nachricht mit dem {wort} nicht löschen. "
@@ -413,7 +416,7 @@ class TelegramKanal:
             )
         else:
             text += f"\nDeine Nachricht mit dem {wort} habe ich aus dem Chat gelöscht."
-        await self.sende_antwort(chat_id, text)
+        await self._sende_befehlsantwort(chat_id, replace(antwort, text=text))
 
     async def _bei_nachricht(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or update.effective_chat is None:
