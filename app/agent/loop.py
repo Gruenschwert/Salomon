@@ -162,6 +162,7 @@ class Agent:
                 freigaben_stand,
                 user,
                 await lade_notizen(self._session_fabrik, user),
+                umgebung.mail_konten if umgebung is not None else None,
             ),
         }
         if tools := self._registry.api_definitionen(user, umgebung):
@@ -196,6 +197,9 @@ class Agent:
                     elif tool.ist_schreibend(block.input):
                         # Änderungen bereitet nicht das einfache Modell vor.
                         eskaliere("schreibendes Tool")
+                    elif tool.mailinhalt:
+                        # Mailinhalt von außen liest nicht das einfache Modell.
+                        eskaliere("Mailinhalt")
                     if tool is not None and tool.komplex and stufe != KOMPLEX:
                         # Dieses Tool braucht das starke Modell; ab hier läuft es weiter.
                         stufe, grund = KOMPLEX, f"komplex: Tool {tool.name}"

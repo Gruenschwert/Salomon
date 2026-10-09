@@ -18,6 +18,8 @@ from app.db.models import (
     jetzt,
 )
 from app.db.session import db_sitzung
+from app.mail.lauf import aktueller_mail_lauf
+from app.mail.schutz import warnung_anderer_dienst
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
 from app.tools.base import (
     Tool,
@@ -87,6 +89,13 @@ class Freigaben:
             ergebnis_kurz=f"Freigabe #{approval.id} angefragt",
         )
         anzahl, kompakt = tool.vorschau_darstellung(vorschau, params)
+        # Wurde in diesem Lauf Mailinhalt gelesen, steht das in der Vorschau jedes anderen
+        # Dienstes: Aus einer Mail entsteht nie von selbst eine Änderung in Asana oder Shopify.
+        # Die Mail-Tools nennen ihre Herkunft selbst.
+        warnung = None if tool.vertraulich else warnung_anderer_dienst(aktueller_mail_lauf.get())
+        if warnung:
+            vorschau = f"{vorschau}\n\n{warnung}"
+            kompakt = f"{kompakt}\n\n{warnung}" if kompakt else None
         return FreigabeAnfrage(
             approval_id=approval.id, vorschau_text=vorschau, anzahl=anzahl, kompakt_text=kompakt
         )
