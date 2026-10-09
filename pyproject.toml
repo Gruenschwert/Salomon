@@ -43,3 +43,7 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures aus anderen Testmodulen werden importiert und dann als Parameter benutzt.
+"tests/test_mail_*.py" = ["F811"]

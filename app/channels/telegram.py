@@ -365,9 +365,9 @@ class TelegramKanal:
         """Rundnachricht an alle aktiven Personen mit dieser Rolle."""
         return await an_rolle_senden(self._session_fabrik, self.sende_antwort, rolle, text)
 
-    async def _bei_geheimnis(self, update: Update, nutzer) -> None:
-        """Die Nachricht nach /verbinden: sofort aus dem Chat löschen, nie speichern, nie
-        loggen, nie an das Modell geben."""
+    async def _bei_geheimnis(self, update: Update, nutzer, wort: str = "Token") -> None:
+        """Die Nachricht mit Token oder Passwort: sofort aus dem Chat löschen, nie speichern,
+        nie loggen, nie an das Modell geben."""
         chat_id = update.effective_chat.id
         nachricht = update.effective_message
         geheimnis = nachricht.text or ""
@@ -387,20 +387,36 @@ class TelegramKanal:
             text = FEHLER_TEXT
         if not geloescht:
             text += (
-                "\nIch konnte deine Nachricht mit dem Token nicht löschen. Bitte lösche sie selbst."
+                f"\nIch konnte deine Nachricht mit dem {wort} nicht löschen. "
+                "Bitte lösche sie selbst."
             )
         else:
-            text += "\nDeine Nachricht mit dem Token habe ich aus dem Chat gelöscht."
+            text += f"\nDeine Nachricht mit dem {wort} habe ich aus dem Chat gelöscht."
         await self.sende_antwort(chat_id, text)
 
     async def _bei_nachricht(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or update.effective_chat is None:
             return
-        if self.befehle.erwartet_geheimnis(update.effective_chat.id, update.effective_user.id):
+        dialog = self.befehle.dialog(update.effective_chat.id, update.effective_user.id)
+        if dialog is not None:
+            # Die Nachricht gehört zu einem Befehl (/verbinden, /signatur) und geht weder an
+            # das Modell noch in den Verlauf.
             nutzer = await self._erlaubter_nutzer(update.effective_user.id)
-            if nutzer is not None:
-                await self._bei_geheimnis(update, nutzer)
-            return
+            if nutzer is None:
+                return
+            if dialog.geheim:
+                await self._bei_geheimnis(update, nutzer, dialog.wort)
+                return
+            try:
+                text = await self.befehle.nimm_eingabe(
+                    nutzer, update.effective_chat.id, update.effective_message.text or ""
+                )
+            except Exception as exc:
+                log.error("Fehler bei einer Eingabe zu einem Befehl: %s", type(exc).__name__)
+                text = FEHLER_TEXT
+            if text is not None:
+                await self.sende_antwort(update.effective_chat.id, text)
+                return
         nachricht = EingehendeNachricht(
             chat_id=update.effective_chat.id,
             absender_id=update.effective_user.id,

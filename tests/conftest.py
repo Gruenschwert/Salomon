@@ -222,3 +222,35 @@ def baue_agent(settings, session_fabrik, registry, freigaben, kosten):
         return Agent(settings, session_fabrik, client, registry, freigaben, kosten)
 
     return _baue
+
+
+@pytest.fixture
+def mail_server():
+    """Lokaler IMAP- und SMTP-Server im Arbeitsspeicher; kein Zugriff auf das Internet."""
+    from app.mail import verbindung
+    from tests.mail_fake import FakeMailServer
+
+    verbindung.bremse.leere()
+    server = FakeMailServer()
+    yield server
+    server.stoppe()
+
+
+@pytest.fixture
+def mail_netz(mail_server, monkeypatch):
+    from app.mail import verbindung
+    from tests.mail_fake import TestNetz
+
+    async def ohne_warten(sekunden: float) -> None:
+        return None
+
+    monkeypatch.setattr(verbindung, "_warte", ohne_warten)
+    return TestNetz(mail_server)
+
+
+@pytest.fixture
+def mkontext(kontext, mail_netz) -> ToolKontext:
+    """Tool-Kontext, dessen Mail-Verbindungen beim lokalen Test-Server landen."""
+    from dataclasses import replace
+
+    return replace(kontext, mail_netz=mail_netz)

@@ -3,13 +3,13 @@
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
 from app.agent.gedaechtnis import GedaechtnisFehler, lade_notizen, merke, vergiss_alles
 from app.agent.router import AUTO, STUFEN, ModellVorgaben
 from app.auth.kontext import NutzerKontext
-from app.auth.rechte import ADMIN_KOSTEN_ALLE, ADMIN_NUTZER, RECHTE
+from app.auth.rechte import ADMIN_KOSTEN_ALLE, ADMIN_NUTZER, MAIL_EIGENE, RECHTE
 from app.auth.users import (
     NutzerFehler,
     aendere_profil,
@@ -19,9 +19,10 @@ from app.auth.users import (
     liste_nutzer,
     setze_sperre,
 )
-from app.auth.zugaenge import DIENSTE, Zugaenge
+from app.auth.zugaenge import DIENSTE, MAIL, Zugaenge
 from app.db.models import ROLLEN
 from app.db.session import SessionFabrik
+from app.mail.konten import ist_adresse, lies_server, pruefe_label
 from app.observability.audit import protokolliere
 from app.observability.costs import ERLAUBTE_ZEITRAEUME, Kosten, als_euro
 from app.tools.base import ToolFehler
@@ -40,6 +41,38 @@ NUR_PRIVAT_TEXT = (
     "Zugangsdaten nehme ich nur im privaten Chat mit mir an, nie in einer Gruppe. Schreib mir "
     "dort /verbinden."
 )
+
+
+MAIL_KI_HINWEIS = (
+    "Wichtig vorab: Wenn du mich nach deinen Mails fragst, gehen die Inhalte dieser Mails zur "
+    "Verarbeitung an den KI-Dienst Anthropic. Dauerhaft gespeichert werden sie bei mir nicht; "
+    "im Gesprächsverlauf liegen sie verschlüsselt und werden nach {stunden} Stunden entfernt."
+)
+MAIL_KEIN_RECHT_TEXT = "Für Mails fehlt dir das Recht. Die Rolle dafür kann ein Admin vergeben."
+NAME_BEHALTEN = {"ok", "okay", "nein", "nö", "passt", "ja", "gut", "danke"}
+SIGNATUR_LOESCHEN = {"löschen", "loeschen", "keine", "-"}
+
+# Arten von Eingaben, auf die der Bot nach einem Befehl wartet
+ART_TOKEN = "token"
+ART_MAIL_ADRESSE = "mail_adresse"
+ART_MAIL_PASSWORT = "mail_passwort"
+ART_MAIL_NAME = "mail_name"
+ART_SIGNATUR = "signatur"
+
+
+@dataclass
+class _Dialog:
+    """Die nächste Nachricht dieser Person in diesem Chat gehört zu einem Befehl und geht
+    nicht an das Modell. `geheim`: Sie enthält Zugangsdaten und wird aus dem Chat gelöscht."""
+
+    art: str
+    gueltig_bis: float
+    geheim: bool = False
+    daten: dict = field(default_factory=dict, repr=False)
+
+    @property
+    def wort(self) -> str:
+        return "Passwort" if self.art == ART_MAIL_PASSWORT else "Token"
 
 
 @dataclass(frozen=True)
@@ -86,18 +119,24 @@ class Befehle:
         self._zugaenge = zugaenge
         self._kosten = kosten
         self._vorgaben = vorgaben or ModellVorgaben()
-        # (Chat-ID, Telegram-ID) -> (Dienst, gültig bis). Die nächste Nachricht dieser Person
-        # in diesem Chat ist dann ein Geheimnis und geht an niemanden sonst.
-        self._erwartet: dict[tuple[int, int], tuple[str, float]] = {}
+        # (Chat-ID, Telegram-ID) -> erwartete Eingabe. Die nächste Nachricht dieser Person in
+        # diesem Chat gehört dann zum Befehl und geht an niemanden sonst.
+        self._erwartet: dict[tuple[int, int], _Dialog] = {}
         self._aktionen: dict[str, _Aktion] = {}
         self._tabelle: dict[str, Befehl] = {}
         self.registriere(
             Befehl("start", "Begrüßung", self._start),
             Befehl("hilfe", "zeigt die Befehle, die du nutzen kannst", self._hilfe),
             Befehl(
-                "verbinden", "eigenen Zugang verbinden, z. B. /verbinden asana", self._verbinden
+                "verbinden",
+                "eigenen Zugang verbinden: /verbinden asana oder /verbinden mail",
+                self._verbinden,
             ),
-            Befehl("trennen", "eigenen Zugang entfernen, z. B. /trennen asana", self._trennen),
+            Befehl(
+                "trennen",
+                "eigenen Zugang entfernen: /trennen asana oder /trennen mail <name>",
+                self._trennen,
+            ),
             Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
             Befehl("kosten", "deine Kosten: /kosten oder /kosten 7 (1, 3, 7, 30)", self._kosten_),
             Befehl("modell", "Modellstufe: /modell einfach, standard, komplex, auto", self._modell),
@@ -478,6 +517,13 @@ class Befehle:
             raise ToolFehler("Zugänge sind hier nicht eingerichtet.")
         return self._zugaenge
 
+    def _warte_auf(
+        self, chat_id: int, nutzer: NutzerKontext, art: str, geheim: bool = False, **daten: object
+    ) -> None:
+        self._erwartet[(chat_id, nutzer.telegram_id)] = _Dialog(
+            art, time.monotonic() + GEHEIMNIS_FRIST_SEKUNDEN, geheim, daten
+        )
+
     async def _verbinden(
         self, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
     ) -> str:
@@ -486,33 +532,130 @@ class Befehle:
         dienst = self._dienst(argumente)
         if not privat:
             return NUR_PRIVAT_TEXT
-        self._erwartet[(chat_id, nutzer.telegram_id)] = (
-            dienst,
-            time.monotonic() + GEHEIMNIS_FRIST_SEKUNDEN,
-        )
+        if dienst == MAIL:
+            return await self._verbinden_mail(nutzer, argumente[1:], chat_id)
+        self._warte_auf(chat_id, nutzer, ART_TOKEN, geheim=True, dienst=dienst)
         return (
             f"Schick mir jetzt als nächste Nachricht {DIENSTE[dienst]}.\n"
             "Ich lösche die Nachricht sofort aus dem Chat, speichere den Token verschlüsselt und "
             "gebe ihn nie an die KI weiter. Mit jedem anderen Befehl brichst du ab."
         )
 
-    def erwartet_geheimnis(self, chat_id: int, telegram_id: int) -> str | None:
-        """Der Dienst, für den die nächste Nachricht dieser Person ein Geheimnis ist."""
+    async def _verbinden_mail(
+        self, nutzer: NutzerKontext, argumente: list[str], chat_id: int
+    ) -> str:
+        if not nutzer.darf(MAIL_EIGENE):
+            return MAIL_KEIN_RECHT_TEXT
+        zugang = self._zugang()
+        settings = zugang.settings
+        # Optional: eigene Server, falls das Postfach nicht beim Standardanbieter liegt.
+        if len(argumente) not in (0, 2):
+            return (
+                "So geht es: /verbinden mail. Liegt das Postfach bei einem anderen Anbieter: "
+                "/verbinden mail <imap-server[:port]> <smtp-server[:port]>"
+            )
+        server = {}
+        if argumente:
+            server = {
+                "imap": lies_server(argumente[0], settings.mail_imap_port),
+                "smtp": lies_server(argumente[1], settings.mail_smtp_port),
+            }
+        self._warte_auf(chat_id, nutzer, ART_MAIL_ADRESSE, **server)
+        zeilen = []
+        if not await zugang.postfaecher(nutzer):
+            zeilen.append(MAIL_KI_HINWEIS.format(stunden=settings.mail_kontext_ttl_stunden))
+        zeilen.append(
+            "Schick mir jetzt als nächste Nachricht die E-Mail-Adresse des Postfachs. Danach "
+            "frage ich nach dem Passwort. Mit jedem anderen Befehl brichst du ab."
+        )
+        return "\n".join(zeilen)
+
+    def dialog(self, chat_id: int, telegram_id: int) -> _Dialog | None:
+        """Die Eingabe, auf die der Bot von dieser Person in diesem Chat gerade wartet."""
         eintrag = self._erwartet.get((chat_id, telegram_id))
         if eintrag is None:
             return None
-        if time.monotonic() > eintrag[1]:
+        if time.monotonic() > eintrag.gueltig_bis:
             del self._erwartet[(chat_id, telegram_id)]
             return None
-        return eintrag[0]
+        return eintrag
+
+    def erwartet_geheimnis(self, chat_id: int, telegram_id: int) -> str | None:
+        """Der Dienst, für den die nächste Nachricht dieser Person ein Geheimnis ist."""
+        eintrag = self.dialog(chat_id, telegram_id)
+        if eintrag is None or not eintrag.geheim:
+            return None
+        return MAIL if eintrag.art == ART_MAIL_PASSWORT else eintrag.daten["dienst"]
 
     def brich_ab(self, chat_id: int, telegram_id: int) -> None:
         self._erwartet.pop((chat_id, telegram_id), None)
 
+    async def nimm_eingabe(self, nutzer: NutzerKontext, chat_id: int, text: str) -> str | None:
+        """Verarbeitet eine erwartete Eingabe ohne Geheimnis (Adresse, Name, Signatur). Sie
+        geht nicht an das Modell und nicht in den Verlauf. None: Die Nachricht gehört doch
+        nicht zum Befehl und wird ganz normal beantwortet."""
+        eintrag = self._erwartet.pop((chat_id, nutzer.telegram_id))
+        text = text.strip()
+        try:
+            if eintrag.art == ART_MAIL_ADRESSE:
+                return self._nimm_adresse(nutzer, chat_id, text, eintrag)
+            if eintrag.art == ART_MAIL_NAME:
+                return await self._nimm_namen(nutzer, chat_id, text, eintrag)
+            if eintrag.art == ART_SIGNATUR:
+                return await self._nimm_signatur(nutzer, text, eintrag)
+        except ToolFehler as exc:
+            return str(exc)
+        return None
+
+    def _nimm_adresse(
+        self, nutzer: NutzerKontext, chat_id: int, text: str, eintrag: _Dialog
+    ) -> str:
+        if not ist_adresse(text):
+            return (
+                "Das sieht nicht nach einer E-Mail-Adresse aus. Es wurde nichts gespeichert. "
+                "Mit /verbinden mail kannst du neu beginnen."
+            )
+        self._warte_auf(
+            chat_id, nutzer, ART_MAIL_PASSWORT, geheim=True, adresse=text, **eintrag.daten
+        )
+        return (
+            "Schick mir jetzt als nächste Nachricht das Passwort dieses Postfachs.\n"
+            "Ich lösche die Nachricht sofort aus dem Chat, prüfe die Anmeldung (es wird nichts "
+            "gesendet), speichere das Passwort verschlüsselt und gebe es nie an die KI weiter."
+        )
+
+    async def _nimm_namen(
+        self, nutzer: NutzerKontext, chat_id: int, text: str, eintrag: _Dialog
+    ) -> str | None:
+        label = eintrag.daten["label"]
+        if text.lower().rstrip(".!") in NAME_BEHALTEN:
+            return f"Alles klar, das Postfach heißt „{label}“."
+        if not text.lower().startswith("name "):
+            # Kein Wunsch nach einem anderen Namen: Die Nachricht wird normal beantwortet.
+            return None
+        try:
+            neu = pruefe_label(text[5:])
+            postfach = await self._zugang().benenne_mail_um(nutzer, label, neu)
+        except ToolFehler as exc:
+            self._warte_auf(chat_id, nutzer, ART_MAIL_NAME, label=label)
+            return f"{exc} Versuch es noch einmal mit „name <neuer name>“."
+        return f"Das Postfach heißt jetzt „{postfach.label}“."
+
+    async def _nimm_signatur(self, nutzer: NutzerKontext, text: str, eintrag: _Dialog) -> str:
+        label = eintrag.daten["label"]
+        if text.lower() in SIGNATUR_LOESCHEN:
+            await self._zugang().setze_signatur(nutzer, label, "")
+            return f"Die Signatur von „{label}“ ist gelöscht."
+        await self._zugang().setze_signatur(nutzer, label, text)
+        return f"Gespeichert. Diese Signatur hänge ich an Entwürfe aus „{label}“ an."
+
     async def nimm_geheimnis(self, nutzer: NutzerKontext, chat_id: int, geheimnis: str) -> str:
-        """Verarbeitet die Nachricht nach /verbinden. Sie wird weder gespeichert noch geloggt
-        noch an das Modell gegeben; der Kanal hat sie bereits aus dem Chat gelöscht."""
-        dienst, _ = self._erwartet.pop((chat_id, nutzer.telegram_id))
+        """Verarbeitet die Nachricht mit Token oder Passwort. Sie wird weder gespeichert noch
+        geloggt noch an das Modell gegeben; der Kanal hat sie bereits aus dem Chat gelöscht."""
+        eintrag = self._erwartet.pop((chat_id, nutzer.telegram_id))
+        if eintrag.art == ART_MAIL_PASSWORT:
+            return await self._nimm_passwort(nutzer, chat_id, geheimnis, eintrag)
+        dienst = eintrag.daten["dienst"]
         try:
             konto = await self._zugang().verbinde(nutzer, dienst, geheimnis)
         except ToolFehler as exc:
@@ -536,10 +679,46 @@ class Befehle:
         )
         return f"✅ {dienst.capitalize()} ist verbunden, Konto: {konto or 'unbekannt'}."
 
+    async def _nimm_passwort(
+        self, nutzer: NutzerKontext, chat_id: int, passwort: str, eintrag: _Dialog
+    ) -> str:
+        daten = eintrag.daten
+        try:
+            postfach = await self._zugang().verbinde_mail(
+                nutzer, daten["adresse"], passwort, daten.get("imap"), daten.get("smtp")
+            )
+        except ToolFehler as exc:
+            await protokolliere(
+                self._session_fabrik,
+                user_id=nutzer.id,
+                tool_name="/verbinden",
+                parameter={"dienst": MAIL},
+                fehler="abgelehnt",
+            )
+            return (
+                f"Das hat nicht geklappt: {exc} Es wurde nichts gespeichert. Mit /verbinden "
+                "mail kannst du es noch einmal versuchen."
+            )
+        await protokolliere(
+            self._session_fabrik,
+            user_id=nutzer.id,
+            tool_name="/verbinden",
+            parameter={"dienst": MAIL, "konto": postfach.label},
+            ergebnis_kurz="verbunden",
+        )
+        self._warte_auf(chat_id, nutzer, ART_MAIL_NAME, label=postfach.label)
+        return (
+            f"✅ Das Postfach {postfach.adresse} ist verbunden. Bei mir heißt es "
+            f"„{postfach.label}“. Möchtest du einen anderen Namen? Dann antworte mit "
+            "„name <neuer name>“. Sonst schreib einfach weiter."
+        )
+
     async def _trennen(
         self, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
     ) -> str:
         dienst = self._dienst(argumente)
+        if dienst == MAIL:
+            return await self._trennen_mail(nutzer, argumente[1:])
         entfernt = await self._zugang().trenne(nutzer, dienst)
         await protokolliere(
             self._session_fabrik,
@@ -552,13 +731,48 @@ class Befehle:
             return f"{dienst.capitalize()} war nicht verbunden."
         return f"{dienst.capitalize()} ist getrennt. Dein gespeicherter Token ist gelöscht."
 
+    async def _eigenes_label(self, nutzer: NutzerKontext, argumente: list[str], befehl: str) -> str:
+        """Das gemeinte eigene Postfach; ohne Angabe das einzige."""
+        eigene = [p.label for p in await self._zugang().postfaecher(nutzer)]
+        if not eigene:
+            raise ToolFehler("Du hast kein Postfach verbunden. Los geht es mit /verbinden mail.")
+        if not argumente:
+            if len(eigene) == 1:
+                return eigene[0]
+            raise ToolFehler(f"Welches Postfach? {befehl} <name>. Deine: {', '.join(eigene)}.")
+        label = argumente[0].lower()
+        if label not in eigene:
+            raise ToolFehler(
+                f"Ein Postfach „{label}“ hast du nicht verbunden. Deine: {', '.join(eigene)}."
+            )
+        return label
+
+    async def _trennen_mail(self, nutzer: NutzerKontext, argumente: list[str]) -> str:
+        label = await self._eigenes_label(nutzer, argumente, "/trennen mail")
+        entfernt = await self._zugang().trenne_mail(nutzer, label)
+        await protokolliere(
+            self._session_fabrik,
+            user_id=nutzer.id,
+            tool_name="/trennen",
+            parameter={"dienst": MAIL, "konto": label},
+            ergebnis_kurz="getrennt" if entfernt else "war nicht verbunden",
+        )
+        return (
+            f"Das Postfach „{label}“ ist getrennt. Das gespeicherte Passwort und die Signatur "
+            "sind gelöscht."
+        )
+
     async def _verbunden(
         self, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
     ) -> str:
         dienste = await self._zugang().liste(nutzer)
         if not dienste:
             return "Du hast noch keinen Dienst verbunden. Los geht es mit /verbinden asana."
-        return "Verbunden: " + ", ".join(dienste) + ". Die Zugangsdaten selbst zeige ich nie an."
+        teile = [dienst for dienst in dienste if dienst != MAIL]
+        if MAIL in dienste:
+            postfaecher = await self._zugang().postfaecher(nutzer)
+            teile += [f"Postfach {p.label} ({p.adresse})" for p in postfaecher]
+        return "Verbunden: " + ", ".join(teile) + ". Die Zugangsdaten selbst zeige ich nie an."
 
 
 def rechte_als_text(nutzer: NutzerKontext) -> str:

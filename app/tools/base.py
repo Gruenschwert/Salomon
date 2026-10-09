@@ -82,6 +82,8 @@ class ToolKontext:
     dateien: DateiQuelle = field(default_factory=DateiQuelle)
     # Nur für Tests: ersetzt die Netzwerkschicht von httpx.
     http_transport: httpx.AsyncBaseTransport | None = None
+    # Nur für Tests: ersetzt die Verbindungen zu IMAP und SMTP (siehe app/mail/verbindung.py).
+    mail_netz: object | None = None
 
 
 # Der Nutzer, in dessen Auftrag das Tool gerade läuft. Wird vom Ausführer gesetzt, damit
