@@ -6,11 +6,22 @@ Alles hier läuft über `db_sitzung` und betrifft immer nur die Daten der Person
 import logging
 from datetime import timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.auth.users import alle_nutzer_ids
-from app.db.models import Message, TelegramDatei, UserMemory, jetzt
+from app.db.models import (
+    STATUS_ABGELAUFEN,
+    STATUS_ABGELEHNT,
+    STATUS_BESTAETIGUNG,
+    STATUS_OFFEN,
+    Approval,
+    Message,
+    TelegramDatei,
+    UserMemory,
+    jetzt,
+)
 from app.db.session import SessionFabrik, db_sitzung
+from app.mail.schutz import ENTFERNT, PLATZHALTER_ENTFERNT, VERSIEGELT
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +71,64 @@ async def vergiss_alles(session_fabrik: SessionFabrik, nutzer: object) -> tuple[
     async with db_sitzung(session_fabrik, nutzer_id) as session:
         nachrichten = await session.execute(delete(Message).where(Message.user_id == nutzer_id))
         notizen = await session.execute(delete(UserMemory).where(UserMemory.user_id == nutzer_id))
+        # Auch vorbereitete Mails, die noch auf eine Freigabe warten, verschwinden sofort.
+        await _leere_versiegelte_freigaben(session, nutzer_id, STATUS_ABGELEHNT)
         await session.commit()
     return nachrichten.rowcount, notizen.rowcount
+
+
+async def _leere_versiegelte_freigaben(
+    session, nutzer_id: int, status: str, aelter_als=None
+) -> int:
+    """Entfernt den versiegelten Inhalt offener Freigaben (Mail) und schließt sie ab."""
+    bedingungen = [
+        Approval.user_id == nutzer_id,
+        Approval.status.in_([STATUS_OFFEN, STATUS_BESTAETIGUNG]),
+    ]
+    if aelter_als is not None:
+        bedingungen.append(Approval.erstellt_am < aelter_als)
+    offene = await session.scalars(select(Approval).where(*bedingungen))
+    betroffen = [
+        f.id for f in offene if isinstance(f.parameter, dict) and VERSIEGELT in f.parameter
+    ]
+    if betroffen:
+        await session.execute(
+            update(Approval)
+            .where(Approval.id.in_(betroffen))
+            .values(parameter=ENTFERNT, status=status, entschieden_am=jetzt())
+        )
+    return len(betroffen)
+
+
+async def bereinige_mailinhalt(
+    session_fabrik: SessionFabrik, ttl_stunden: int, freigabe_minuten: int = 15
+) -> int:
+    """Ersetzt Mailinhalt im Verlauf, der älter ist als die Frist, durch den Platzhalter und
+    leert abgelaufene, nie entschiedene Mail-Freigaben. Liefert die Zahl der ersetzten Zeilen.
+
+    Geht Person für Person vor und fasst jeweils nur deren eigene Zeilen an. Gelesen wird
+    dabei nichts; ins Log kommt nur die Anzahl.
+    """
+    grenze = jetzt() - timedelta(hours=max(ttl_stunden, 0))
+    freigabe_grenze = jetzt() - timedelta(minutes=freigabe_minuten)
+    ersetzt = 0
+    for nutzer_id in await alle_nutzer_ids(session_fabrik):
+        async with db_sitzung(session_fabrik, nutzer_id) as session:
+            ergebnis = await session.execute(
+                update(Message)
+                .where(
+                    Message.user_id == nutzer_id,
+                    Message.inhalt_verschluesselt.is_not(None),
+                    Message.zeit < grenze,
+                )
+                .values(inhalt=PLATZHALTER_ENTFERNT, inhalt_verschluesselt=None)
+            )
+            await _leere_versiegelte_freigaben(
+                session, nutzer_id, STATUS_ABGELAUFEN, aelter_als=freigabe_grenze
+            )
+            await session.commit()
+        ersetzt += ergebnis.rowcount
+    return ersetzt
 
 
 async def bereinige_alte_nachrichten(session_fabrik: SessionFabrik, tage: int) -> int:

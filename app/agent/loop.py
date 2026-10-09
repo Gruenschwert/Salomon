@@ -8,12 +8,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import anthropic
 
 from app.agent.gedaechtnis import lade_notizen
-from app.agent.history import lade_verlauf, speichere_austausch
+from app.agent.history import MailAblage, lade_verlauf_mit_mail, speichere_austausch
 from app.agent.prompts import system_bloecke
 from app.agent.router import EINFACH, KOMPLEX, STANDARD, ModellVorgaben, Modellwahl, waehle_modell
 from app.auth.approvals import Freigaben
 from app.auth.kontext import NutzerKontext
 from app.auth.rechte import MAIL_EIGENE
+from app.auth.tresor import Tresor, TresorFehler
 from app.channels.base import Antwort, EingehendeNachricht, FreigabeAnfrage
 from app.config import Settings
 from app.db.session import SessionFabrik
@@ -105,10 +106,16 @@ class Agent:
     async def beantworte(self, nachricht: EingehendeNachricht, user: NutzerKontext) -> Antwort:
         if gesperrt := await self._kosten.limit_erreicht(user.id):
             return Antwort(text=gesperrt)
-        verlauf = await lade_verlauf(
-            self._session_fabrik, user, nachricht.chat_id, self._settings.history_max_messages
+        tresor = self._tresor()
+        verlauf = await lade_verlauf_mit_mail(
+            self._session_fabrik,
+            user,
+            nachricht.chat_id,
+            self._settings.history_max_messages,
+            tresor,
+            self._settings.mail_kontext_ttl_stunden,
         )
-        messages = [*verlauf, {"role": "user", "content": _inhalt(nachricht)}]
+        messages = [*verlauf.nachrichten, {"role": "user", "content": _inhalt(nachricht)}]
         # Freigaben, die in dieser Runde angelegt wurden; der Kanal zeigt sie mit Buttons an.
         anfragen: list[FreigabeAnfrage] = []
         wahl = waehle_modell(nachricht, user, self._vorgaben.hole(user.nutzer_id))
@@ -121,11 +128,8 @@ class Agent:
         lauf = MailLauf(
             nutzer_text=nachricht.text or "",
             # Was die Person in ihren letzten Nachrichten selbst geschrieben hat
-            frueherer_nutzer_text=" ".join(
-                m["content"]
-                for m in verlauf
-                if m["role"] == "user" and isinstance(m["content"], str)
-            ),
+            frueherer_nutzer_text=verlauf.nutzer_text,
+            verlauf_hat_mail=verlauf.hat_mail,
         )
         marke = aktueller_mail_lauf.set(lauf)
         try:
@@ -135,6 +139,7 @@ class Agent:
                 # Einmal mit dem Standardmodell wiederholen. Die Kosten beider Läufe sind
                 # gebucht; Freigaben gab es im ersten Lauf noch keine.
                 log.info("Eskalation von einfach auf standard: %s", exc.grund)
+                lauf.kontext_texte.clear()
                 wahl = Modellwahl(STANDARD, f"standard: eskaliert von einfach ({exc.grund})")
                 text = await self._schleife(list(messages), user, anfragen, stand, wahl, umgebung)
         except anthropic.APIError:
@@ -144,10 +149,28 @@ class Agent:
             # Die IMAP-Verbindungen dieser Anfrage sauber schließen.
             await schliesse_lauf()
             aktueller_mail_lauf.reset(marke)
+        # Hat die Runde Mailinhalt gelesen oder eine Mail vorbereitet, kommen Tool-Ergebnisse
+        # und Antwort nur verschlüsselt und befristet in den Verlauf.
+        ablage = None
+        if lauf.vertraulich or verlauf.hat_mail:
+            ablage = MailAblage(tresor, "\n\n".join(lauf.kontext_texte))
         await speichere_austausch(
-            self._session_fabrik, nachricht.chat_id, user.id, _verlaufstext(nachricht), text
+            self._session_fabrik,
+            nachricht.chat_id,
+            user.id,
+            _verlaufstext(nachricht),
+            text,
+            ablage,
         )
         return Antwort(text=text, freigaben=tuple(anfragen))
+
+    def _tresor(self) -> Tresor | None:
+        """Der Schlüssel für Mailinhalt im Verlauf; None, wenn keiner hinterlegt ist."""
+        try:
+            tresor = Tresor.aus_settings(self._settings)
+        except TresorFehler:
+            return None
+        return tresor if tresor.verfuegbar else None
 
     async def _schleife(
         self,

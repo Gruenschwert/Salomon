@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 
 from app import __version__
-from app.agent.gedaechtnis import bereinige_alte_nachrichten
+from app.agent.gedaechtnis import bereinige_alte_nachrichten, bereinige_mailinhalt
 from app.agent.history import speichere_hinweis
 from app.auth.approvals import Freigaben
 from app.auth.users import finde_erlaubten_nutzer
@@ -59,6 +59,8 @@ FEHLER_TEXT = "Es ist ein interner Fehler aufgetreten. Bitte versuche es später
 NUR_ADMIN_TEXT = "Dieser Befehl ist Admins vorbehalten."
 MAX_FOTOS = 5
 BEREINIGUNG_ABSTAND_SEKUNDEN = 24 * 60 * 60
+# Mailinhalt im Verlauf hat eine Frist in Stunden; deshalb läuft dessen Bereinigung stündlich.
+MAIL_BEREINIGUNG_ABSTAND_SEKUNDEN = 60 * 60
 # So lange wird nach dem letzten Foto eines Albums auf weitere gewartet.
 ALBUM_WARTEZEIT_SEKUNDEN = 1.5
 FOTO_UNLESBAR_TEXT = (
@@ -144,18 +146,37 @@ class TelegramKanal:
             await self._beim_start()
         self._bereinigung = asyncio.create_task(self._bereinige_taeglich())
 
+    async def bereinige(self, mit_nachrichten: bool = True) -> None:
+        """Ein Durchlauf der Bereinigung: abgelaufener Mailinhalt, dazu (einmal am Tag)
+        Nachrichten jenseits der Aufbewahrungsfrist. Ins Log kommen nur Anzahlen."""
+        try:
+            ersetzt = await bereinige_mailinhalt(
+                self._session_fabrik, self._settings.mail_kontext_ttl_stunden
+            )
+            if ersetzt:
+                log.info("Mailinhalt im Verlauf: %s abgelaufene Einträge entfernt", ersetzt)
+        except Exception as exc:
+            log.error("Bereinigung von Mailinhalt fehlgeschlagen: %s", type(exc).__name__)
+        if not mit_nachrichten:
+            return
+        try:
+            anzahl = await bereinige_alte_nachrichten(
+                self._session_fabrik, self._settings.message_retention_days
+            )
+            if anzahl:
+                log.info("Aufbewahrungsfrist: %s alte Nachrichten gelöscht", anzahl)
+        except Exception as exc:
+            log.error("Bereinigung alter Nachrichten fehlgeschlagen: %s", type(exc).__name__)
+
     async def _bereinige_taeglich(self) -> None:
-        """Hintergrundjob: löscht einmal am Tag Nachrichten jenseits der Aufbewahrungsfrist."""
+        """Hintergrundjob: entfernt stündlich abgelaufenen Mailinhalt und löscht einmal am
+        Tag Nachrichten jenseits der Aufbewahrungsfrist."""
+        je_tag = BEREINIGUNG_ABSTAND_SEKUNDEN // MAIL_BEREINIGUNG_ABSTAND_SEKUNDEN
+        durchlauf = 0
         while True:
-            try:
-                anzahl = await bereinige_alte_nachrichten(
-                    self._session_fabrik, self._settings.message_retention_days
-                )
-                if anzahl:
-                    log.info("Aufbewahrungsfrist: %s alte Nachrichten gelöscht", anzahl)
-            except Exception as exc:
-                log.error("Bereinigung alter Nachrichten fehlgeschlagen: %s", type(exc).__name__)
-            await asyncio.sleep(BEREINIGUNG_ABSTAND_SEKUNDEN)
+            await self.bereinige(mit_nachrichten=durchlauf % je_tag == 0)
+            durchlauf += 1
+            await asyncio.sleep(MAIL_BEREINIGUNG_ABSTAND_SEKUNDEN)
 
     async def lade_datei(self, file_id: str) -> bytes:
         """Lädt eine Datei, die ein Nutzer geschickt hat, in den Arbeitsspeicher."""

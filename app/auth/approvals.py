@@ -23,7 +23,7 @@ from app.db.models import (
 )
 from app.db.session import db_sitzung
 from app.mail.lauf import aktueller_mail_lauf
-from app.mail.schutz import warnung_anderer_dienst
+from app.mail.schutz import ENTFERNT, VERSIEGELT, warnung_anderer_dienst
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
 from app.tools.base import (
     Tool,
@@ -38,10 +38,6 @@ from app.tools.registry import Registry, audit_angaben, fuehre_tool_aus
 log = logging.getLogger(__name__)
 
 FREIGABE_GUELTIGKEIT = timedelta(minutes=15)
-# Parameter vertraulicher Freigaben (Mail) liegen nur versiegelt in der Datenbank und werden
-# nach der Entscheidung entfernt.
-VERSIEGELT = "_versiegelt"
-ENTFERNT = {"_entfernt": True}
 ZWECK_FREIGABE = "freigabe"
 NICHT_LESBAR_TEXT = (
     "⚠️ Diese Freigabe lässt sich nicht mehr lesen; nichts wurde ausgeführt. Bitte stoße die "
