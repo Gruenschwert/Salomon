@@ -10,6 +10,7 @@ from app.auth.tresor import Tresor
 from app.mail import kennung as kennungen
 from app.mail.kennung import Kennung
 from app.mail.konten import Postfach, loese_konto, tresor_fuer
+from app.mail.lauf import aktueller_mail_lauf
 from app.tools.base import BasisTool, ToolFehler, Umgebung, aktueller_nutzer
 
 log = logging.getLogger(__name__)
@@ -93,3 +94,38 @@ class MailTool(BasisTool):
 
     def audit_zusatz(self, daten: dict) -> dict:
         return {}
+
+
+class MailSchreibTool(MailTool):
+    """Ein Mail-Tool mit Wirkung: läuft nur nach Freigabe mit vollständiger Vorschau.
+
+    Empfänger, Betreff und Text stehen nie im Klartext in der Datenbank (`vertraulich`).
+    """
+
+    schreibend: ClassVar[bool] = True
+    vertraulich: ClassVar[bool] = True
+    ergebnis_im_verlauf: ClassVar[bool] = True
+    # Überschrift der Vorschau, z. B. „Mail senden“
+    titel: ClassVar[str] = ""
+
+    async def bereite_vor(self, **params) -> str:
+        postfach = await self.postfach(params.pop("konto", None))
+        if (lauf := aktueller_mail_lauf.get()) is not None:
+            # Die Antwort dieser Runde enthält in aller Regel den Entwurf der Mail.
+            lauf.vertraulich = True
+        try:
+            return await self.vorschau_fuer(postfach, **params)
+        except ToolFehler:
+            raise
+        except Exception as exc:
+            log.error("Fehler in der Vorschau von %s: %s", self.name, type(exc).__name__)
+            raise ToolFehler(INTERNER_FEHLER_TEXT) from None
+
+    async def vorschau_fuer(self, postfach: Postfach, **params) -> str:
+        raise NotImplementedError
+
+    def neutrale_vorschau(self, params: dict) -> str:
+        konto = params.get("konto")
+        if isinstance(konto, str) and _LABEL.match(konto):
+            return f"{self.titel} (Postfach {konto})"
+        return self.titel

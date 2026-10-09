@@ -1,11 +1,15 @@
 """Freigabe-Flow: Schreibende Tools laufen erst nach ✅ des anfragenden Nutzers."""
 
+import base64
+import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 
 from app.auth.kontext import NutzerKontext
+from app.auth.tresor import Tresor, TresorFehler
 from app.auth.users import finde_erlaubten_nutzer
 from app.channels.base import FreigabeAnfrage
 from app.db.models import (
@@ -23,14 +27,26 @@ from app.mail.schutz import warnung_anderer_dienst
 from app.observability.audit import EREIGNIS_UNBEKANNT, protokolliere
 from app.tools.base import (
     Tool,
+    ToolFehler,
     ToolKontext,
     aktuelle_freigabe,
     aktueller_nutzer,
     zweifach_bestaetigt,
 )
-from app.tools.registry import Registry, fuehre_tool_aus
+from app.tools.registry import Registry, audit_angaben, fuehre_tool_aus
+
+log = logging.getLogger(__name__)
 
 FREIGABE_GUELTIGKEIT = timedelta(minutes=15)
+# Parameter vertraulicher Freigaben (Mail) liegen nur versiegelt in der Datenbank und werden
+# nach der Entscheidung entfernt.
+VERSIEGELT = "_versiegelt"
+ENTFERNT = {"_entfernt": True}
+ZWECK_FREIGABE = "freigabe"
+NICHT_LESBAR_TEXT = (
+    "⚠️ Diese Freigabe lässt sich nicht mehr lesen; nichts wurde ausgeführt. Bitte stoße die "
+    "Aktion noch einmal an."
+)
 
 STATUS_NICHT_GEFUNDEN = "nicht_gefunden"
 NICHT_DEINE_FREIGABE_TEXT = (
@@ -75,9 +91,16 @@ class Freigaben:
             vorschau = await tool.bereite_vor(**params)
         finally:
             aktueller_nutzer.reset(marke)
+        gespeichert, kurz = params, vorschau
+        if tool.vertraulich:
+            # Empfänger, Betreff und Text stehen nie im Klartext in der Datenbank: Die
+            # Parameter werden mit dem Schlüssel der Person versiegelt, und als Vorschau
+            # bleibt nur eine Zeile ohne Inhalt. Die volle Vorschau sieht die Person im Chat.
+            gespeichert = self._versiegle(user, params)
+            kurz = tool.neutrale_vorschau(params)
         async with db_sitzung(self._session_fabrik, user) as session:
             approval = Approval(
-                user_id=user.id, tool_name=tool.name, parameter=params, vorschau_text=vorschau
+                user_id=user.id, tool_name=tool.name, parameter=gespeichert, vorschau_text=kurz
             )
             session.add(approval)
             await session.commit()
@@ -85,7 +108,7 @@ class Freigaben:
             self._session_fabrik,
             user_id=user.id,
             tool_name=tool.name,
-            parameter=params,
+            parameter=audit_angaben(tool, params, None)[0],
             ergebnis_kurz=f"Freigabe #{approval.id} angefragt",
         )
         anzahl, kompakt = tool.vorschau_darstellung(vorschau, params)
@@ -99,6 +122,41 @@ class Freigaben:
         return FreigabeAnfrage(
             approval_id=approval.id, vorschau_text=vorschau, anzahl=anzahl, kompakt_text=kompakt
         )
+
+    def _tresor(self) -> Tresor:
+        try:
+            tresor = Tresor.aus_settings(self._kontext.settings)
+        except TresorFehler:
+            raise ToolFehler("Der Schlüssel für vertrauliche Freigaben ist ungültig.") from None
+        if not tresor.verfuegbar:
+            raise ToolFehler("Der Schlüssel für vertrauliche Freigaben fehlt.")
+        return tresor
+
+    def _versiegle(self, user: NutzerKontext, params: dict) -> dict:
+        versiegelt = self._tresor().versiegle(
+            user.id, ZWECK_FREIGABE, json.dumps(params, ensure_ascii=False)
+        )
+        return {VERSIEGELT: base64.b64encode(versiegelt).decode("ascii")}
+
+    def _parameter(self, approval: Approval, user: NutzerKontext) -> dict | None:
+        """Die Parameter einer Freigabe im Klartext; None, wenn sie nicht mehr lesbar sind."""
+        parameter = approval.parameter
+        if not isinstance(parameter, dict) or VERSIEGELT not in parameter:
+            return None if parameter == ENTFERNT else parameter
+        try:
+            versiegelt = base64.b64decode(parameter[VERSIEGELT])
+            return json.loads(self._tresor().entsiegle(user.id, ZWECK_FREIGABE, versiegelt))
+        except (ToolFehler, TresorFehler, ValueError):
+            log.warning("Versiegelte Freigabe #%s ist nicht lesbar", approval.id)
+            return None
+
+    async def _entferne_parameter(self, approval_id: int, user: NutzerKontext) -> None:
+        """Nach der Entscheidung bleibt von einer vertraulichen Freigabe kein Inhalt zurück."""
+        async with db_sitzung(self._session_fabrik, user) as session:
+            await session.execute(
+                update(Approval).where(Approval.id == approval_id).values(parameter=ENTFERNT)
+            )
+            await session.commit()
 
     async def verwerfen(self, approval_id: int, grund: str, nutzer: NutzerKontext) -> bool:
         """Verwirft eine eigene Freigabe, die die Person nicht erreicht hat.
@@ -118,6 +176,9 @@ class Freigaben:
                 .values(status=STATUS_ABGELEHNT, entschieden_am=jetzt())
             )
             await session.commit()
+        tool = self._registry.hole(approval.tool_name)
+        if tool is None or tool.vertraulich:
+            await self._entferne_parameter(approval_id, nutzer)
         await protokolliere(
             self._session_fabrik,
             user_id=approval.user_id,
@@ -195,6 +256,10 @@ class Freigaben:
             if approval is None or approval.user_id != user.id:
                 return Entscheidung(STATUS_NICHT_GEFUNDEN, NICHT_DEINE_FREIGABE_TEXT)
             tool = self._registry.hole(approval.tool_name)
+            vertraulich = bool(tool and tool.vertraulich) or (
+                isinstance(approval.parameter, dict) and VERSIEGELT in approval.parameter
+            )
+            parameter = self._parameter(approval, user)
             frage = None
             # Ablehnen und Ablaufen gehen in beiden Stufen, Zustimmen nur in der passenden.
             erlaubte_stufen = [STATUS_OFFEN, STATUS_BESTAETIGUNG]
@@ -206,8 +271,8 @@ class Freigaben:
                 neuer_status = STATUS_GENEHMIGT
                 erlaubte_stufen = [STATUS_BESTAETIGUNG]
             else:
-                if tool is not None:
-                    frage = tool.zweite_bestaetigung(approval.vorschau_text, **approval.parameter)
+                if tool is not None and parameter is not None:
+                    frage = tool.zweite_bestaetigung(approval.vorschau_text, **parameter)
                 neuer_status = STATUS_BESTAETIGUNG if frage else STATUS_GENEHMIGT
                 erlaubte_stufen = [STATUS_OFFEN]
             # Bedingtes Update: Jede Stufe kann nur einmal entschieden werden (Doppelklick).
@@ -231,14 +296,22 @@ class Freigaben:
                 ergebnis_kurz=f"Freigabe #{approval.id}: zweite Bestätigung angefragt",
             )
             return Entscheidung(STATUS_BESTAETIGUNG, frage, user_id=user.id, rueckfrage=True)
+        if vertraulich:
+            # Entschieden ist entschieden: Der versiegelte Inhalt wird jetzt entfernt, auch
+            # vor der Ausführung, die mit den Parametern im Arbeitsspeicher läuft.
+            await self._entferne_parameter(approval.id, user)
         if neuer_status == STATUS_GENEHMIGT:
-            return await self._ausfuehren(approval, user, zweifach=bestaetigt)
+            if parameter is None:
+                return Entscheidung(STATUS_GENEHMIGT, NICHT_LESBAR_TEXT, user_id=user.id)
+            return await self._ausfuehren(approval, user, parameter, zweifach=bestaetigt)
 
         await protokolliere(
             self._session_fabrik,
             user_id=user.id,
             tool_name=approval.tool_name,
-            parameter=approval.parameter,
+            parameter={"freigabe": approval.id}
+            if vertraulich or tool is None
+            else audit_angaben(tool, parameter, None)[0],
             ergebnis_kurz=f"Freigabe #{approval.id} {neuer_status}",
         )
         verlauf = {"im_verlauf": bool(tool and tool.ergebnis_im_verlauf), "user_id": user.id}
@@ -253,7 +326,7 @@ class Freigaben:
         )
 
     async def _ausfuehren(
-        self, approval: Approval, user: NutzerKontext, zweifach: bool
+        self, approval: Approval, user: NutzerKontext, parameter: dict, zweifach: bool
     ) -> Entscheidung:
         tool = self._registry.hole(approval.tool_name)
         if tool is None or not user.darf(*tool.erforderliche_rechte):
@@ -261,7 +334,7 @@ class Freigaben:
                 self._session_fabrik,
                 user_id=user.id,
                 tool_name=approval.tool_name,
-                parameter=approval.parameter,
+                parameter={"freigabe": approval.id},
                 fehler="nicht verfügbar",
             )
             return Entscheidung(
@@ -270,7 +343,7 @@ class Freigaben:
         marke = aktuelle_freigabe.set(approval.id)
         marke_zweifach = zweifach_bestaetigt.set(zweifach)
         try:
-            ergebnis = await fuehre_tool_aus(tool, approval.parameter, user, self._kontext)
+            ergebnis = await fuehre_tool_aus(tool, parameter, user, self._kontext)
         finally:
             zweifach_bestaetigt.reset(marke_zweifach)
             aktuelle_freigabe.reset(marke)

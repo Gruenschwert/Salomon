@@ -138,6 +138,11 @@ class Befehle:
                 self._trennen,
             ),
             Befehl("verbunden", "zeigt, welche Dienste du verbunden hast", self._verbunden),
+            Befehl(
+                "signatur",
+                "Signatur eines Postfachs ansehen oder ändern: /signatur <name>",
+                self._signatur,
+            ),
             Befehl("kosten", "deine Kosten: /kosten oder /kosten 7 (1, 3, 7, 30)", self._kosten_),
             Befehl("modell", "Modellstufe: /modell einfach, standard, komplex, auto", self._modell),
             Befehl("profil", "Name, Anrede und Zeitzone anzeigen oder ändern", self._profil),
@@ -760,6 +765,25 @@ class Befehle:
         return (
             f"Das Postfach „{label}“ ist getrennt. Das gespeicherte Passwort und die Signatur "
             "sind gelöscht."
+        )
+
+    async def _signatur(
+        self, nutzer: NutzerKontext, argumente: list[str], chat_id: int, privat: bool
+    ) -> str:
+        if not nutzer.darf(MAIL_EIGENE):
+            return MAIL_KEIN_RECHT_TEXT
+        label = await self._eigenes_label(nutzer, argumente, "/signatur")
+        postfach = next(p for p in await self._zugang().postfaecher(nutzer) if p.label == label)
+        self._warte_auf(chat_id, nutzer, ART_SIGNATUR, label=label)
+        aktuell = (
+            f"Aktuelle Signatur von „{label}“:\n{postfach.signatur}"
+            if postfach.signatur
+            else f"Das Postfach „{label}“ hat noch keine Signatur."
+        )
+        return (
+            f"{aktuell}\n\nSchick mir als nächste Nachricht die neue Signatur (mehrere Zeilen "
+            "sind möglich) oder „löschen“. Ich hänge sie an jede Mail und jeden Entwurf aus "
+            "diesem Postfach an. Mit jedem anderen Befehl brichst du ab."
         )
 
     async def _verbunden(

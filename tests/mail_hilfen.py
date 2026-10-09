@@ -37,3 +37,17 @@ class Werkzeuge:
         ergebnis = await self.rufe(name, nutzer, **params)
         assert not ergebnis.fehler, ergebnis.text
         return ergebnis.daten
+
+
+async def frage_an(freigaben, werkzeuge, nutzer, name: str, lauf=None, **params):
+    """Bereitet ein schreibendes Tool so vor, wie es der Agent tut: Es entsteht nur eine
+    Freigabe. `lauf` ist der Zustand der Anfrage (gelesene Mails, Text der Person)."""
+    from app.mail.lauf import MailLauf, aktueller_mail_lauf
+    from app.mail.verbindung import schliesse_lauf
+
+    marke = aktueller_mail_lauf.set(lauf if lauf is not None else MailLauf())
+    try:
+        return await freigaben.anfragen(nutzer, werkzeuge.registry.hole(name), params)
+    finally:
+        await schliesse_lauf()
+        aktueller_mail_lauf.reset(marke)

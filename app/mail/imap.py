@@ -289,5 +289,88 @@ def suche_gespraech(
     return gefunden
 
 
-def kodiere_ordner(name: str) -> bytes:
-    return encode_folder(name)
+# ---------------------------------------------------------------- Schreiben
+
+KEIN_ORDNER_TEXT = {
+    ENTWUERFE: "In dem Postfach gibt es keinen Ordner für Entwürfe.",
+    GESENDET: "In dem Postfach gibt es keinen Ordner für gesendete Mails.",
+}
+PAPIERKORB_TEXT = (
+    "In den Papierkorb verschiebe ich nicht: Löschen von Mails gibt es über den Bot nicht."
+)
+VERSCHIEBEN_UNSICHER_TEXT = (
+    "Der Mailserver kann eine einzelne Mail nicht sicher verschieben (weder MOVE noch UIDPLUS). "
+    "Bitte verschiebe sie im Mailprogramm."
+)
+
+
+def lege_ab(box: BaseMailBox, art: str, roh: bytes, merkmale: tuple[str, ...]) -> str:
+    """Legt eine Mail per APPEND im Ordner für Entwürfe bzw. Gesendet ab; liefert den Ordner."""
+    ordner = finde_ordner(box, art)
+    if ordner is None:
+        raise MailFehler(KEIN_ORDNER_TEXT[art])
+    box.append(roh, ordner, flag_set=merkmale)
+    return ordner
+
+
+def ist_abgelegt(box: BaseMailBox, ordner: str, message_id: str) -> bool:
+    """Ob eine Mail mit dieser Message-ID schon im Ordner liegt (manche Server legen
+    gesendete Mails selbst ab)."""
+    oeffne(box, ordner)
+    return bool(box.uids(str(AND(header=Header("Message-ID", message_id)))))
+
+
+def lege_gesendete_ab(box: BaseMailBox, roh: bytes, message_id: str) -> str:
+    ordner = finde_ordner(box, GESENDET)
+    if ordner is None:
+        raise MailFehler(KEIN_ORDNER_TEXT[GESENDET])
+    if not ist_abgelegt(box, ordner, message_id):
+        box.append(roh, ordner, flag_set=("\\Seen",))
+    return ordner
+
+
+def _pruefe_ok(antwort: tuple) -> None:
+    if antwort[0] != "OK":
+        raise MailFehler("Der Mailserver hat die Änderung abgelehnt")
+
+
+def _oeffne_zum_aendern(box: BaseMailBox, kennung: Kennung) -> str:
+    oeffne_fuer(box, kennung, nur_lesen=False)
+    uid = str(kennung.uid)
+    if uid not in box.uids(f"UID {uid}"):
+        raise MailFehler(MAIL_FEHLT_TEXT)
+    return uid
+
+
+def markiere(box: BaseMailBox, kennung: Kennung, gelesen: bool) -> None:
+    """Setzt oder entfernt nur das Gelesen-Merkmal dieser einen Mail."""
+    uid = _oeffne_zum_aendern(box, kennung)
+    _pruefe_ok(box.client.uid("STORE", uid, "+FLAGS" if gelesen else "-FLAGS", "(\\Seen)"))
+
+
+def pruefe_ziel(box: BaseMailBox, ziel: str) -> str:
+    """Der genaue Name des Zielordners. Der Papierkorb ist kein Ziel: Löschen gibt es nicht."""
+    name = loese_ordner(box, ziel)
+    if dict(_waehlbar(box)).get(name) == PAPIERKORB:
+        raise MailFehler(PAPIERKORB_TEXT)
+    return name
+
+
+def verschiebe(box: BaseMailBox, kennung: Kennung, ziel: str) -> str:
+    """Verschiebt genau diese eine Mail. Liefert den Namen des Zielordners."""
+    name = pruefe_ziel(box, ziel)
+    if name == kennung.ordner:
+        raise MailFehler("Die Mail liegt schon in diesem Ordner.")
+    uid = _oeffne_zum_aendern(box, kennung)
+    faehigkeiten = {str(f).upper() for f in box.client.capabilities}
+    if "MOVE" in faehigkeiten:
+        _pruefe_ok(box.client.uid("MOVE", uid, encode_folder(name)))
+    elif "UIDPLUS" in faehigkeiten:
+        # Ohne MOVE: kopieren, dann genau diese eine Mail entfernen (UID EXPUNGE), damit
+        # nichts anderes mit dem Merkmal „gelöscht“ aus dem Ordner verschwindet.
+        _pruefe_ok(box.client.uid("COPY", uid, encode_folder(name)))
+        _pruefe_ok(box.client.uid("STORE", uid, "+FLAGS", "(\\Deleted)"))
+        _pruefe_ok(box.client.uid("EXPUNGE", uid))
+    else:
+        raise MailFehler(VERSCHIEBEN_UNSICHER_TEXT)
+    return name

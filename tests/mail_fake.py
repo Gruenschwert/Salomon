@@ -85,6 +85,8 @@ class FakeMailServer:
         self.imap_verbindungen = 0
         self.faehigkeiten = "IMAP4rev1 UIDPLUS MOVE SPECIAL-USE AUTH=PLAIN"
         self.abgelehnte_empfaenger: set[str] = set()
+        # True: Der Server legt gesendete Mails selbst im Ordner „Gesendet“ ab.
+        self.legt_gesendete_selbst_ab = False
         self._imap = _starte(_ImapHandler, self)
         self._smtp = _starte(_SmtpHandler, self)
         self.imap_port = self._imap.server_address[1]
@@ -563,6 +565,8 @@ class _SmtpHandler(socketserver.StreamRequestHandler):
                 while (teil := self.rfile.readline()) != b".\r\n":
                     zeilen.append(teil[1:] if teil.startswith(b"..") else teil)
                 zustand.gesendet.append((absender, list(empfaenger), b"".join(zeilen)))
+                if zustand.legt_gesendete_selbst_ab:
+                    zustand.postfaecher[absender].lege_ab("Gesendet", b"".join(zeilen), {"\\Seen"})
                 self.sende("250 OK angenommen")
             elif befehl in ("RSET", "NOOP"):
                 self.sende("250 OK")

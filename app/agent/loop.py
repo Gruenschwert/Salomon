@@ -118,7 +118,15 @@ class Agent:
         if user.darf(MAIL_EIGENE):
             konten = tuple(await mail_konten.labels(self._session_fabrik, user))
         umgebung = Umgebung(mail_konten=konten)
-        lauf = MailLauf(nutzer_text=nachricht.text or "")
+        lauf = MailLauf(
+            nutzer_text=nachricht.text or "",
+            # Was die Person in ihren letzten Nachrichten selbst geschrieben hat
+            frueherer_nutzer_text=" ".join(
+                m["content"]
+                for m in verlauf
+                if m["role"] == "user" and isinstance(m["content"], str)
+            ),
+        )
         marke = aktueller_mail_lauf.set(lauf)
         try:
             try:

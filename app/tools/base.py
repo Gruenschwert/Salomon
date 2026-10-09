@@ -150,6 +150,11 @@ class BasisTool:
         Standard. Tools mit Mailinhalt liefern hier nur Aktion, Konto-Label und Anzahl."""
         return None
 
+    def neutrale_vorschau(self, params: dict) -> str:
+        """Bei `vertraulich`: die eine Zeile ohne Inhalt, die statt der Vorschau in der
+        Datenbank steht."""
+        return "Vertrauliche Aktion"
+
     def ist_schreibend(self, params: dict) -> bool:
         """Ob dieser Aufruf eine Freigabe braucht. Nur wenige Tools hängen von den Parametern
         ab (ein allgemeiner API-Aufruf liest mit GET und schreibt mit POST)."""
